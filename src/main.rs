@@ -186,6 +186,35 @@ fn process_dir(
     errors
 }
 
+#[derive(Debug, PartialEq, Eq)]
+struct FileMetaData {
+    modified: Option<std::time::SystemTime>,
+    length: u64,
+    file_type: std::fs::FileType,
+    permissions: std::fs::Permissions,
+}
+
+impl FileMetaData {
+    fn try_new(path: &std::path::Path) -> Option<Self> {
+        let metadata = path.metadata().ok()?;
+        let modified = metadata.modified().ok();
+        Some(Self {
+            modified,
+            length: metadata.len(),
+            file_type: metadata.file_type(),
+            permissions: metadata.permissions(),
+        })
+    }
+}
+
+fn get_hash(path: &std::path::Path) -> Option<blake3::Hash> {
+    let mut hasher = blake3::Hasher::new();
+    let mut file = std::fs::File::open(path).ok()?;
+    std::io::copy(&mut file, &mut hasher).ok()?;
+    let res = hasher.finalize();
+    Some(res)
+}
+
 fn copy_if_newer(
     source_file: &std::path::Path,
     destination_file: &std::path::Path,
@@ -198,41 +227,54 @@ fn copy_if_newer(
         !destination_file.is_dir(),
         "Destiation file must not be a directory."
     );
+
+    let src_metadata = FileMetaData::try_new(source_file);
+
     if destination_file.exists() {
-        if let (Ok(src_metadata), Ok(dest_metadata)) =
-            (source_file.metadata(), destination_file.metadata())
-            && let (Ok(src_modification), Ok(dest_modification)) =
-                (src_metadata.modified(), dest_metadata.modified())
+        if let (Some(src_metadata), Some(dest_metadata)) =
+            (&src_metadata, FileMetaData::try_new(destination_file))
+            && let (Some(src_hash), Some(dest_hash)) =
+                (get_hash(source_file), get_hash(destination_file))
         {
-            if src_modification <= dest_modification
-                && src_metadata.len() == dest_metadata.len()
-                && src_metadata.file_type() == dest_metadata.file_type()
-            {
-                // FIXME: It is better to check if their content is still the same.
+            if *src_metadata == dest_metadata && src_hash == dest_hash {
                 println!(
                     "Skipping \"{source_file:?}\" as destination file \"{destination_file:?}\" is still up to date. "
                 );
                 return Ok(());
             }
         } else {
-            // NOTE: If any of this fields cannot be read just log it, but try to copy the file anyway
             eprintln!(
-                "WARINING: Cannot read all metadata of either {source_file:?} or {destination_file:?}."
+                "WARINING: Cannot read all metadata of either {source_file:?} or {destination_file:?}. We just try to copy the file anyway."
             );
         }
     }
 
-    // TODO: Implement check if it is newer.
     println!("Copy \"{source_file:?}\" to \"{destination_file:?}\"");
     if let Err(e) = std::fs::copy(source_file, destination_file) {
-        Err(CoreError::CannotCopyFile(
+        return Err(CoreError::CannotCopyFile(
             source_file.into(),
             destination_file.into(),
             e,
-        ))
-    } else {
-        Ok(())
+        ));
     }
+    if let Some(src_metadata) = src_metadata
+        && set_modified(&src_metadata, destination_file).is_none()
+    {
+        eprintln!(
+            "WARNING: Could not copy modified time from \"{source_file:?}\" destination file \"{destination_file:?}\"",
+        );
+    }
+
+    Ok(())
+}
+
+fn set_modified(src_metadata: &FileMetaData, dest_path: &std::path::Path) -> Option<()> {
+    if let Some(modified) = src_metadata.modified {
+        let file = std::fs::File::open(dest_path).ok()?;
+        file.set_modified(modified).ok()?;
+    }
+
+    Some(())
 }
 
 fn run(config: Config) -> std::vec::Vec<CoreError> {

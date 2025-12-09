@@ -1,2 +1,5 @@
 /target
 /out
+out*.txt
+perf.data
+perf.data.old
