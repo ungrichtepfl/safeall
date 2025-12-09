@@ -198,6 +198,30 @@ fn copy_if_newer(
         !destination_file.is_dir(),
         "Destiation file must not be a directory."
     );
+    if destination_file.exists() {
+        if let (Ok(src_metadata), Ok(dest_metadata)) =
+            (source_file.metadata(), destination_file.metadata())
+            && let (Ok(src_modification), Ok(dest_modification)) =
+                (src_metadata.modified(), dest_metadata.modified())
+        {
+            if src_modification <= dest_modification
+                && src_metadata.len() == dest_metadata.len()
+                && src_metadata.file_type() == dest_metadata.file_type()
+            {
+                // FIXME: It is better to check if their content is still the same.
+                println!(
+                    "Skipping \"{source_file:?}\" as destination file \"{destination_file:?}\" is still up to date. "
+                );
+                return Ok(());
+            }
+        } else {
+            // NOTE: If any of this fields cannot be read just log it, but try to copy the file anyway
+            eprintln!(
+                "WARINING: Cannot read all metadata of either {source_file:?} or {destination_file:?}."
+            );
+        }
+    }
+
     // TODO: Implement check if it is newer.
     println!("Copy \"{source_file:?}\" to \"{destination_file:?}\"");
     if let Err(e) = std::fs::copy(source_file, destination_file) {
