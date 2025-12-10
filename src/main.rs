@@ -105,7 +105,6 @@ enum CoreError {
     DestinationIsNotADirectory(std::path::PathBuf),
     CannotReadDirectoryContent(std::path::PathBuf, std::io::Error),
     CannotGetDirEntry(std::path::PathBuf, std::io::Error),
-    CannotCreateNewDestinationDir(std::path::PathBuf, std::path::PathBuf),
     DestinationForSourceDirExistsAsFile(std::path::PathBuf, std::path::PathBuf),
     CannotCopyFile(std::path::PathBuf, std::path::PathBuf, std::io::Error),
     CouldNotGenerateDestinationPath(std::path::StripPrefixError),
@@ -117,38 +116,49 @@ impl std::fmt::Display for CoreError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             CoreError::SourcePathDoesNotExist(path) => {
-                write!(f, "Source path does not exist: {path:?}")
+                write!(f, "Source path does not exist: {}", path.display())
             }
 
             CoreError::CannotCreateDestinationDir(path, error) => {
-                write!(f, "Cannot create destination path \"{path:?}\": {error}")
+                write!(
+                    f,
+                    "Cannot create destination path \"{}\": {error}",
+                    path.display()
+                )
             }
 
             CoreError::DestinationIsNotADirectory(path) => {
-                write!(f, "Destination is not a directory: {path:?}")
+                write!(f, "Destination is not a directory: {}", path.display())
             }
 
             CoreError::CannotReadDirectoryContent(path, error) => {
-                write!(f, "Could not read source directory \"{path:?}\": {error}")
+                write!(
+                    f,
+                    "Could not read source directory \"{}\": {error}",
+                    path.display()
+                )
             }
 
             CoreError::CannotGetDirEntry(path, error) => {
-                write!(f, "Could not read source directory \"{path:?}\": {error}")
+                write!(
+                    f,
+                    "Could not read source directory \"{}\": {error}",
+                    path.display()
+                )
             }
-
-            CoreError::CannotCreateNewDestinationDir(source_path, current_destination) => write!(
-                f,
-                "Could not create a new destination directory for path \"{source_path:?}\". Destination to append new basename: {current_destination:?}"
-            ),
 
             CoreError::DestinationForSourceDirExistsAsFile(source_path, destination_dir) => write!(
                 f,
-                "Could not create a new destination directory for path \"{source_path:?}\" because destination already exists but not as a directory: {destination_dir:?}"
+                "Could not create a new destination directory for path \"{}\" because destination already exists but not as a directory: {}",
+                source_path.display(),
+                destination_dir.display()
             ),
 
             CoreError::CannotCopyFile(source_file, destination_file, error) => write!(
                 f,
-                "Could not copy source \"{source_file:?}\" to destination file \"{destination_file:?}\": {error}"
+                "Could not copy source \"{}\" to destination file \"{}\": {error}",
+                source_file.display(),
+                destination_file.display()
             ),
 
             CoreError::CouldNotGenerateDestinationPath(strip_prefix_error) => write!(
@@ -211,55 +221,40 @@ fn process_dir(
     debug_assert!(destination.is_dir(), "Destination is not a dir");
     let mut errors = vec![];
 
-    let dir_entry = match std::fs::read_dir(source)
-        .map_err(|e| CoreError::CannotReadDirectoryContent(source.into(), e))
-    {
-        Ok(dir_entry) => dir_entry,
-        Err(e) => {
-            errors.push(e);
-            return errors;
-        }
-    };
-
-    for entry in dir_entry {
-        match entry {
-            Ok(entry) => {
-                let path = entry.path();
-                if let Some(basename) = path.file_name() {
-                    let new_destination = destination.join(basename);
-                    if path.is_dir() {
-                        if new_destination.exists() {
-                            if !new_destination.is_dir() {
-                                errors.push(CoreError::DestinationForSourceDirExistsAsFile(
-                                    path,
+    for path in FileEntry::from(source) {
+        match path {
+            Ok(path) => {
+                match get_destination_path(destination, source, &path) {
+                    Ok(new_destination) => {
+                        if path.is_dir() {
+                            if new_destination.exists() {
+                                if !new_destination.is_dir() {
+                                    errors.push(CoreError::DestinationForSourceDirExistsAsFile(
+                                        path,
+                                        new_destination,
+                                    ));
+                                }
+                            } else if let Err(e) = std::fs::create_dir(&new_destination) {
+                                errors.push(CoreError::CannotCreateDestinationDir(
                                     new_destination,
+                                    e,
                                 ));
-                                continue;
                             }
-                        } else if let Err(e) = std::fs::create_dir(&new_destination) {
-                            errors.push(CoreError::CannotCreateDestinationDir(new_destination, e));
-                            continue;
-                        }
-                        errors.append(&mut process_dir(&path, &new_destination));
-                    } else {
-                        // Is a file or a symbolic link
-                        if let Err(e) = copy_if_newer(&path, &new_destination) {
-                            errors.push(e);
+                        } else {
+                            // Is a file or a symbolic link
+                            if let Err(e) = copy_if_newer(&path, &new_destination) {
+                                errors.push(e);
+                            }
                         }
                     }
-                } else {
-                    errors.push(CoreError::CannotCreateNewDestinationDir(
-                        path,
-                        destination.into(),
-                    ));
+                    Err(error) => {
+                        errors.push(error);
+                    }
                 }
             }
-            Err(e) => {
-                errors.push(CoreError::CannotGetDirEntry(source.into(), e));
-            }
+            Err(err) => errors.push(err),
         }
     }
-
     errors
 }
 
@@ -310,23 +305,41 @@ fn copy_if_newer(
     if destination_file.exists() {
         if let (Some(src_metadata), Some(dest_metadata)) =
             (&src_metadata, FileMetaData::try_new(destination_file))
-            && let (Some(src_hash), Some(dest_hash)) =
-                (get_hash(source_file), get_hash(destination_file))
         {
-            if *src_metadata == dest_metadata && src_hash == dest_hash {
-                println!(
-                    "Skipping \"{source_file:?}\" as destination file \"{destination_file:?}\" is still up to date. "
-                );
-                return Ok(());
+            if *src_metadata == dest_metadata {
+                if let (Some(src_hash), Some(dest_hash)) =
+                    (get_hash(source_file), get_hash(destination_file))
+                {
+                    if src_hash == dest_hash {
+                        println!(
+                            "Skipping \"{}\" as destination file \"{}\" is still up to date. ",
+                            source_file.display(),
+                            destination_file.display()
+                        );
+                        return Ok(());
+                    }
+                } else {
+                    eprintln!(
+                        "WARNING: Cannot get hash of either {} or {}. We just try to copy the file anyway.",
+                        source_file.display(),
+                        destination_file.display()
+                    );
+                }
             }
         } else {
             eprintln!(
-                "WARINING: Cannot read all metadata of either {source_file:?} or {destination_file:?}. We just try to copy the file anyway."
+                "WARNING: Cannot read all metadata of either {} or {}. We just try to copy the file anyway.",
+                source_file.display(),
+                destination_file.display()
             );
         }
     }
 
-    println!("Copy \"{source_file:?}\" to \"{destination_file:?}\"");
+    println!(
+        "Copy \"{}\" to \"{}\"",
+        source_file.display(),
+        destination_file.display()
+    );
     if let Err(e) = std::fs::copy(source_file, destination_file) {
         return Err(CoreError::CannotCopyFile(
             source_file.into(),
@@ -338,7 +351,9 @@ fn copy_if_newer(
         && set_modified(&src_metadata, destination_file).is_none()
     {
         eprintln!(
-            "WARNING: Could not copy modified time from \"{source_file:?}\" destination file \"{destination_file:?}\"",
+            "WARNING: Could not copy modified time from \"{}\" destination file \"{}\"",
+            source_file.display(),
+            destination_file.display()
         );
     }
 
