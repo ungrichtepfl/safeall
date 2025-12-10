@@ -411,7 +411,7 @@ mod tests {
 
     const WRONG_TEST_DIR: &str = "-------";
     const TEST_DIR: &str = "testdir";
-    const TEST_DIR_FILES: [&str; 15] = [
+    const TEST_DIR_FILES: [&str; 16] = [
         "testdir/",
         "testdir/03_a",
         "testdir/05_directory.csv",
@@ -426,7 +426,8 @@ mod tests {
         "testdir/more2/some file",
         "testdir/more/even-möre/",
         "testdir/more/even-möre/wèirder,name.txt",
-        "testdir/more2/empty-dir/",
+        "testdir/more2/moredir/",
+        "testdir/more2/moredir/epic.file",
     ];
 
     #[test]
