@@ -108,6 +108,7 @@ enum CoreError {
     CannotCreateNewDestinationDir(std::path::PathBuf, std::path::PathBuf),
     DestinationForSourceDirExistsAsFile(std::path::PathBuf, std::path::PathBuf),
     CannotCopyFile(std::path::PathBuf, std::path::PathBuf, std::io::Error),
+    CouldNotGenerateDestinationPath(std::path::StripPrefixError),
 }
 
 impl std::error::Error for CoreError {}
@@ -118,36 +119,42 @@ impl std::fmt::Display for CoreError {
             CoreError::SourcePathDoesNotExist(path) => {
                 write!(f, "Source path does not exist: {path:?}")
             }
+
             CoreError::CannotCreateDestinationDir(path, error) => {
                 write!(f, "Cannot create destination path \"{path:?}\": {error}")
             }
+
             CoreError::DestinationIsNotADirectory(path) => {
                 write!(f, "Destination is not a directory: {path:?}")
             }
+
             CoreError::CannotReadDirectoryContent(path, error) => {
                 write!(f, "Could not read source directory \"{path:?}\": {error}")
             }
+
             CoreError::CannotGetDirEntry(path, error) => {
                 write!(f, "Could not read source directory \"{path:?}\": {error}")
             }
-            CoreError::CannotCreateNewDestinationDir(source_path, current_destination) => {
-                write!(
-                    f,
-                    "Could not create a new destination directory for path \"{source_path:?}\". Destination to append new basename: {current_destination:?}"
-                )
-            }
-            CoreError::DestinationForSourceDirExistsAsFile(source_path, destination_dir) => {
-                write!(
-                    f,
-                    "Could not create a new destination directory for path \"{source_path:?}\" because destination already exists but not as a directory: {destination_dir:?}"
-                )
-            }
-            CoreError::CannotCopyFile(source_file, destination_file, error) => {
-                write!(
-                    f,
-                    "Could not copy source \"{source_file:?}\" to destination file \"{destination_file:?}\": {error}"
-                )
-            }
+
+            CoreError::CannotCreateNewDestinationDir(source_path, current_destination) => write!(
+                f,
+                "Could not create a new destination directory for path \"{source_path:?}\". Destination to append new basename: {current_destination:?}"
+            ),
+
+            CoreError::DestinationForSourceDirExistsAsFile(source_path, destination_dir) => write!(
+                f,
+                "Could not create a new destination directory for path \"{source_path:?}\" because destination already exists but not as a directory: {destination_dir:?}"
+            ),
+
+            CoreError::CannotCopyFile(source_file, destination_file, error) => write!(
+                f,
+                "Could not copy source \"{source_file:?}\" to destination file \"{destination_file:?}\": {error}"
+            ),
+
+            CoreError::CouldNotGenerateDestinationPath(strip_prefix_error) => write!(
+                f,
+                "Could not generate destination path: {strip_prefix_error}"
+            ),
         }
     }
 }
@@ -372,6 +379,19 @@ fn convert_to_error(errors: std::vec::Vec<CoreError>) -> Result<(), Error> {
     }
 }
 
+#[inline]
+fn get_destination_path(
+    destination_root: &std::path::Path,
+    source_root: &std::path::Path,
+    source_path: &std::path::Path,
+) -> Result<std::path::PathBuf, CoreError> {
+    let path_end = source_path
+        .strip_prefix(source_root)
+        .map_err(CoreError::CouldNotGenerateDestinationPath)?;
+
+    Ok([destination_root, path_end].iter().collect())
+}
+
 fn cli() -> Result<(), Error> {
     let config = Config::try_from_cli()?;
     convert_to_error(run(config))
@@ -431,5 +451,30 @@ mod tests {
         assert!(next_file_entry.is_some());
         assert!(next_file_entry.unwrap().is_err());
         assert!(file_entry.next().is_none());
+    }
+
+    #[test]
+    fn test_get_destination_path() -> Result<(), CoreError> {
+        let destination_path = get_destination_path(
+            std::path::Path::new("destination/root"),
+            std::path::Path::new("source/root"),
+            std::path::Path::new("source/root/some/file.txt"),
+        )?;
+        assert_eq!(
+            destination_path,
+            std::path::Path::new("destination/root/some/file.txt")
+        );
+
+        let destination_path = get_destination_path(
+            std::path::Path::new("destination/root"),
+            std::path::Path::new("source/root"),
+            std::path::Path::new("source/root/some/dir/"),
+        )?;
+        assert_eq!(
+            destination_path,
+            std::path::Path::new("destination/root/some/dir/")
+        );
+
+        Ok(())
     }
 }
