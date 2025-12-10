@@ -30,28 +30,25 @@ impl std::fmt::Display for CliError {
 
 struct FileEntry {
     next_readdirs: std::collections::VecDeque<std::path::PathBuf>,
-    current_readdir: std::fs::ReadDir,
+    current_readdir: Option<std::fs::ReadDir>,
     current_dirpath: std::path::PathBuf,
 }
 
-impl TryFrom<&str> for FileEntry {
-    type Error = CoreError;
-    fn try_from(path: &str) -> Result<Self, Self::Error> {
-        Self::try_from(std::path::Path::new(path))
+impl From<&str> for FileEntry {
+    fn from(path: &str) -> Self {
+        Self::from(std::path::Path::new(path))
     }
 }
 
-impl TryFrom<&std::path::Path> for FileEntry {
-    type Error = CoreError;
-
-    fn try_from(path: &std::path::Path) -> Result<Self, Self::Error> {
-        let current_readdir = std::fs::read_dir(path)
-            .map_err(|e| CoreError::CannotReadDirectoryContent(path.into(), e))?;
-        Ok(Self {
-            current_readdir,
-            next_readdirs: std::collections::VecDeque::new(),
+impl From<&std::path::Path> for FileEntry {
+    fn from(path: &std::path::Path) -> Self {
+        let mut next_readdirs = std::collections::VecDeque::new();
+        next_readdirs.push_back(path.into());
+        Self {
+            current_readdir: None,
+            next_readdirs,
             current_dirpath: path.into(),
-        })
+        }
     }
 }
 
@@ -60,8 +57,8 @@ impl Iterator for FileEntry {
 
     fn next(&mut self) -> Option<Self::Item> {
         use CoreError as E;
-        'drain_current_readdir: loop {
-            for entry in &mut self.current_readdir {
+        if let Some(current_readdir) = &mut self.current_readdir {
+            for entry in current_readdir {
                 match entry {
                     Ok(entry) => {
                         let path = entry.path();
@@ -79,29 +76,25 @@ impl Iterator for FileEntry {
                     }
                 }
             }
-            // We know that the `current_readdir` is empty we will create a new one
-            if let Some(next_readdir) = self.next_readdirs.pop_front() {
-                debug_assert!(next_readdir.is_dir(), "Must be a directory.");
-                match std::fs::read_dir(&next_readdir) {
-                    Ok(readdir) => {
-                        self.current_readdir = readdir;
-                        continue 'drain_current_readdir;
-                    }
-                    Err(error) => {
-                        return Some(Err(E::CannotReadDirectoryContent(next_readdir, error)));
-                    }
+        }
+        // We know that the `current_readdir` is empty or is None so will create a new one
+        if let Some(next_readdir) = self.next_readdirs.pop_front() {
+            match std::fs::read_dir(&next_readdir) {
+                Ok(readdir) => {
+                    self.current_readdir = Some(readdir);
+                    self.current_dirpath = next_readdir.clone();
+                    return Some(Ok(next_readdir));
+                }
+                Err(error) => {
+                    return Some(Err(E::CannotReadDirectoryContent(next_readdir, error)));
                 }
             }
-            debug_assert!(
-                self.current_readdir.next().is_none(),
-                "Current readdir must be empty"
-            );
-            debug_assert!(
-                self.next_readdirs.is_empty(),
-                "Next readdirs must be empty."
-            );
-            return None;
         }
+        debug_assert!(
+            self.next_readdirs.is_empty(),
+            "Next readdirs must be empty."
+        );
+        None
     }
 }
 
@@ -398,23 +391,28 @@ mod tests {
 
     const WRONG_TEST_DIR: &str = "-------";
     const TEST_DIR: &str = "testdir";
-    const TEST_DIR_FILES: [&str; 8] = [
+    const TEST_DIR_FILES: [&str; 11] = [
+        "testdir/",
         "testdir/03_a",
         "testdir/05_directory.csv",
         "testdir/04_test.py",
         "testdir/01_This.txt",
         "testdir/02_is.o",
+        "testdir/more/",
         "testdir/more/wèirder,name.txt",
         "testdir/more/weird name.txt",
+        "testdir/more/even-möre/",
         "testdir/more/even-möre/wèirder,name.txt",
     ];
 
     #[test]
     fn test_iterate_test_dir() -> Result<(), CoreError> {
-        let file_entry: FileEntry = TEST_DIR.try_into()?;
+        let file_entry: FileEntry = TEST_DIR.into();
         let files: Result<std::vec::Vec<_>, _> = file_entry.into_iter().collect();
+        let files = files?;
+        assert_eq!(files.len(), TEST_DIR_FILES.len());
         assert_eq!(
-            files?,
+            files,
             TEST_DIR_FILES
                 .iter()
                 .map(std::path::Path::new)
@@ -424,7 +422,10 @@ mod tests {
     }
     #[test]
     fn test_file_entry_fail() {
-        let file_entry: Result<FileEntry, _> = WRONG_TEST_DIR.try_into();
-        assert!(file_entry.is_err());
+        let mut file_entry: FileEntry = WRONG_TEST_DIR.into();
+        let next_file_entry = file_entry.next();
+        assert!(next_file_entry.is_some());
+        assert!(next_file_entry.unwrap().is_err());
+        assert!(file_entry.next().is_none());
     }
 }
