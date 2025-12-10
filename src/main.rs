@@ -28,12 +28,89 @@ impl std::fmt::Display for CliError {
     }
 }
 
+struct FileEntry {
+    next_readdirs: std::collections::VecDeque<std::path::PathBuf>,
+    current_readdir: std::fs::ReadDir,
+    current_dirpath: std::path::PathBuf,
+}
+
+impl TryFrom<&str> for FileEntry {
+    type Error = CoreError;
+    fn try_from(path: &str) -> Result<Self, Self::Error> {
+        Self::try_from(std::path::Path::new(path))
+    }
+}
+
+impl TryFrom<&std::path::Path> for FileEntry {
+    type Error = CoreError;
+
+    fn try_from(path: &std::path::Path) -> Result<Self, Self::Error> {
+        let current_readdir = std::fs::read_dir(path)
+            .map_err(|e| CoreError::CannotReadDirectoryContent(path.into(), e))?;
+        Ok(Self {
+            current_readdir,
+            next_readdirs: std::collections::VecDeque::new(),
+            current_dirpath: path.into(),
+        })
+    }
+}
+
+impl Iterator for FileEntry {
+    type Item = Result<std::path::PathBuf, CoreError>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        use CoreError as E;
+        'drain_current_readdir: loop {
+            for entry in &mut self.current_readdir {
+                match entry {
+                    Ok(entry) => {
+                        let path = entry.path();
+                        if path.is_dir() {
+                            self.next_readdirs.push_back(path);
+                        } else {
+                            return Some(Ok(path));
+                        }
+                    }
+                    Err(error) => {
+                        return Some(Err(E::CannotGetDirEntry(
+                            self.current_dirpath.clone(),
+                            error,
+                        )));
+                    }
+                }
+            }
+            // We know that the `current_readdir` is empty we will create a new one
+            if let Some(next_readdir) = self.next_readdirs.pop_front() {
+                debug_assert!(next_readdir.is_dir(), "Must be a directory.");
+                match std::fs::read_dir(&next_readdir) {
+                    Ok(readdir) => {
+                        self.current_readdir = readdir;
+                        continue 'drain_current_readdir;
+                    }
+                    Err(error) => {
+                        return Some(Err(E::CannotReadDirectoryContent(next_readdir, error)));
+                    }
+                }
+            }
+            debug_assert!(
+                self.current_readdir.next().is_none(),
+                "Current readdir must be empty"
+            );
+            debug_assert!(
+                self.next_readdirs.is_empty(),
+                "Next readdirs must be empty."
+            );
+            return None;
+        }
+    }
+}
+
 #[derive(Debug)]
 enum CoreError {
     SourcePathDoesNotExist(std::path::PathBuf),
     CannotCreateDestinationDir(std::path::PathBuf, std::io::Error),
     DestinationIsNotADirectory(std::path::PathBuf),
-    CannotReadDirectory(std::path::PathBuf, std::io::Error),
+    CannotReadDirectoryContent(std::path::PathBuf, std::io::Error),
     CannotGetDirEntry(std::path::PathBuf, std::io::Error),
     CannotCreateNewDestinationDir(std::path::PathBuf, std::path::PathBuf),
     DestinationForSourceDirExistsAsFile(std::path::PathBuf, std::path::PathBuf),
@@ -54,7 +131,7 @@ impl std::fmt::Display for CoreError {
             CoreError::DestinationIsNotADirectory(path) => {
                 write!(f, "Destination is not a directory: {path:?}")
             }
-            CoreError::CannotReadDirectory(path, error) => {
+            CoreError::CannotReadDirectoryContent(path, error) => {
                 write!(f, "Could not read source directory \"{path:?}\": {error}")
             }
             CoreError::CannotGetDirEntry(path, error) => {
@@ -135,7 +212,7 @@ fn process_dir(
     let mut errors = vec![];
 
     let dir_entry = match std::fs::read_dir(source)
-        .map_err(|e| CoreError::CannotReadDirectory(source.into(), e))
+        .map_err(|e| CoreError::CannotReadDirectoryContent(source.into(), e))
     {
         Ok(dir_entry) => dir_entry,
         Err(e) => {
@@ -313,4 +390,41 @@ fn main() -> std::process::ExitCode {
         return std::process::ExitCode::FAILURE;
     }
     std::process::ExitCode::SUCCESS
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const WRONG_TEST_DIR: &str = "-------";
+    const TEST_DIR: &str = "testdir";
+    const TEST_DIR_FILES: [&str; 8] = [
+        "testdir/03_a",
+        "testdir/05_directory.csv",
+        "testdir/04_test.py",
+        "testdir/01_This.txt",
+        "testdir/02_is.o",
+        "testdir/more/wèirder,name.txt",
+        "testdir/more/weird name.txt",
+        "testdir/more/even-möre/wèirder,name.txt",
+    ];
+
+    #[test]
+    fn test_iterate_test_dir() -> Result<(), CoreError> {
+        let file_entry: FileEntry = TEST_DIR.try_into()?;
+        let files: Result<std::vec::Vec<_>, _> = file_entry.into_iter().collect();
+        assert_eq!(
+            files?,
+            TEST_DIR_FILES
+                .iter()
+                .map(std::path::Path::new)
+                .collect::<std::vec::Vec<_>>()
+        );
+        Ok(())
+    }
+    #[test]
+    fn test_file_entry_fail() {
+        let file_entry: Result<FileEntry, _> = WRONG_TEST_DIR.try_into();
+        assert!(file_entry.is_err());
+    }
 }
