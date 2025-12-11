@@ -77,7 +77,12 @@ impl Iterator for RecursiveReadDir {
                 }
             }
         }
-        // We know that the `current_readdir` is empty or is None so will create a new one
+        debug_assert!(
+            self.current_readdir
+                .as_mut()
+                .is_none_or(|r| r.next().is_none()),
+            "The part above must have drained the current readdir, so we can create a new one below"
+        );
         if let Some(next_readdir) = self.next_readdirs.pop_front() {
             match std::fs::read_dir(&next_readdir) {
                 Ok(readdir) => {
@@ -93,6 +98,12 @@ impl Iterator for RecursiveReadDir {
         debug_assert!(
             self.next_readdirs.is_empty(),
             "Next readdirs must be empty."
+        );
+        debug_assert!(
+            self.current_readdir
+                .as_mut()
+                .is_none_or(|r| r.next().is_none()),
+            "Current readdir must be empty too."
         );
         None
     }
