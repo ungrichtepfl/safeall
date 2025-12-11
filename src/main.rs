@@ -28,19 +28,19 @@ impl std::fmt::Display for CliError {
     }
 }
 
-struct FileEntry {
+struct RecursiveReadDir {
     next_readdirs: std::collections::VecDeque<std::path::PathBuf>,
     current_readdir: Option<std::fs::ReadDir>,
     current_dirpath: std::path::PathBuf,
 }
 
-impl From<&str> for FileEntry {
+impl From<&str> for RecursiveReadDir {
     fn from(path: &str) -> Self {
         Self::from(std::path::Path::new(path))
     }
 }
 
-impl From<&std::path::Path> for FileEntry {
+impl From<&std::path::Path> for RecursiveReadDir {
     fn from(path: &std::path::Path) -> Self {
         let mut next_readdirs = std::collections::VecDeque::new();
         next_readdirs.push_back(path.into());
@@ -52,7 +52,7 @@ impl From<&std::path::Path> for FileEntry {
     }
 }
 
-impl Iterator for FileEntry {
+impl Iterator for RecursiveReadDir {
     type Item = Result<std::path::PathBuf, CoreError>;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -221,7 +221,7 @@ fn backup_directory(
     debug_assert!(destination_directory.is_dir(), "Destination is not a dir");
     let mut errors = vec![];
 
-    for source_file in FileEntry::from(source_directory) {
+    for source_file in RecursiveReadDir::from(source_directory) {
         match source_file {
             Ok(source_file) => {
                 if let Err(err) = backup_file(source_directory, destination_directory, source_file)
@@ -464,7 +464,7 @@ mod tests {
 
     #[test]
     fn test_iterate_test_dir() -> Result<(), CoreError> {
-        let file_entry: FileEntry = TEST_DIR.into();
+        let file_entry: RecursiveReadDir = TEST_DIR.into();
         let files: Result<Vec<_>, _> = file_entry.into_iter().collect();
         let files = files?;
         assert_eq!(files.len(), TEST_DIR_FILES.len());
@@ -479,7 +479,7 @@ mod tests {
     }
     #[test]
     fn test_file_entry_fail() {
-        let mut file_entry: FileEntry = WRONG_TEST_DIR.into();
+        let mut file_entry: RecursiveReadDir = WRONG_TEST_DIR.into();
         let next_file_entry = file_entry.next();
         assert!(next_file_entry.is_some());
         assert!(next_file_entry.unwrap().is_err());
