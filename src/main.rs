@@ -172,7 +172,7 @@ impl std::fmt::Display for CoreError {
 #[derive(Debug)]
 enum Error {
     CliError(CliError),
-    CoreErrors(std::vec::Vec<CoreError>),
+    CoreErrors(Vec<CoreError>),
 }
 
 impl From<CliError> for Error {
@@ -194,68 +194,73 @@ impl std::fmt::Display for Error {
 
 #[derive(Debug)]
 struct Config {
-    source: std::path::PathBuf,
-    destination: std::path::PathBuf,
+    source_directory: std::path::PathBuf,
+    destination_directory: std::path::PathBuf,
 }
 
 impl Config {
     fn try_from_cli() -> Result<Self, CliError> {
         let args: Vec<_> = std::env::args_os().collect();
-        let [_, source, destination] = args
+        let [_, source_directory, destination_directory] = args
             .try_into()
             .map_err(|args: Vec<_>| CliError::WrongNumberOfArguments(args.len()))?;
 
         Ok(Self {
-            source: source.into(),
-            destination: destination.into(),
+            source_directory: source_directory.into(),
+            destination_directory: destination_directory.into(),
         })
     }
 }
 
 #[must_use]
-fn process_dir(
-    source: &std::path::Path,
-    destination: &std::path::Path,
-) -> std::vec::Vec<CoreError> {
-    debug_assert!(source.is_dir(), "Source is not a dir");
-    debug_assert!(destination.is_dir(), "Destination is not a dir");
+fn backup_directory(
+    source_directory: &std::path::Path,
+    destination_directory: &std::path::Path,
+) -> Vec<CoreError> {
+    debug_assert!(source_directory.is_dir(), "Source is not a dir");
+    debug_assert!(destination_directory.is_dir(), "Destination is not a dir");
     let mut errors = vec![];
 
-    for path in FileEntry::from(source) {
-        match path {
-            Ok(path) => {
-                match get_destination_path(destination, source, &path) {
-                    Ok(new_destination) => {
-                        if path.is_dir() {
-                            if new_destination.exists() {
-                                if !new_destination.is_dir() {
-                                    errors.push(CoreError::DestinationForSourceDirExistsAsFile(
-                                        path,
-                                        new_destination,
-                                    ));
-                                }
-                            } else if let Err(e) = std::fs::create_dir(&new_destination) {
-                                errors.push(CoreError::CannotCreateDestinationDir(
-                                    new_destination,
-                                    e,
-                                ));
-                            }
-                        } else {
-                            // Is a file or a symbolic link
-                            if let Err(e) = copy_if_newer(&path, &new_destination) {
-                                errors.push(e);
-                            }
-                        }
-                    }
-                    Err(error) => {
-                        errors.push(error);
-                    }
+    for source_file in FileEntry::from(source_directory) {
+        match source_file {
+            Ok(source_file) => {
+                if let Err(err) = backup_file(source_directory, destination_directory, source_file)
+                {
+                    errors.push(err);
                 }
             }
             Err(err) => errors.push(err),
         }
     }
     errors
+}
+
+fn backup_file(
+    source_directory: &std::path::Path,
+    destination_directory: &std::path::Path,
+    source_file: std::path::PathBuf,
+) -> Result<(), CoreError> {
+    let new_destination_file =
+        get_destination_file_path(destination_directory, source_directory, &source_file)?;
+
+    if !source_file.is_dir() {
+        // Is a file or a symbolic link
+        return copy_if_newer(&source_file, &new_destination_file);
+    }
+    // It is a dir
+    if !new_destination_file.exists() {
+        return std::fs::create_dir(&new_destination_file)
+            .map_err(|e| CoreError::CannotCreateDestinationDir(new_destination_file, e));
+    }
+    // It already exists
+    if !new_destination_file.is_dir() {
+        // If it exists it must be a directory too
+        return Err(CoreError::DestinationForSourceDirExistsAsFile(
+            source_file,
+            new_destination_file,
+        ));
+    }
+    Ok(())
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -287,6 +292,45 @@ fn get_hash(path: &std::path::Path) -> Option<blake3::Hash> {
     Some(res)
 }
 
+fn skip_copy(
+    source_file: &std::path::Path,
+    destination_file: &std::path::Path,
+    source_metadata: &Option<FileMetaData>,
+) -> bool {
+    if !destination_file.exists() {
+        return false;
+    }
+    let destination_metadata = FileMetaData::try_new(destination_file);
+    if destination_metadata.is_none() && source_metadata.is_some()
+        || destination_metadata.is_some() && source_metadata.is_none()
+    {
+        eprintln!(
+            "WARNING: We can get the metadata from one file but not the other. We just try to copy it anyway. Files: \"{}\" and \"{}\"",
+            source_file.display(),
+            destination_file.display()
+        );
+        return false;
+    }
+
+    if *source_metadata != FileMetaData::try_new(destination_file) {
+        return false;
+    }
+
+    if let (Some(src_hash), Some(dest_hash)) = (get_hash(source_file), get_hash(destination_file)) {
+        if src_hash != dest_hash {
+            return false;
+        }
+    } else {
+        eprintln!(
+            "WARNING: Cannot get hash of either {} or {}. We just try to copy the file anyway.",
+            source_file.display(),
+            destination_file.display()
+        );
+    }
+
+    true
+}
+
 fn copy_if_newer(
     source_file: &std::path::Path,
     destination_file: &std::path::Path,
@@ -300,39 +344,9 @@ fn copy_if_newer(
         "Destiation file must not be a directory."
     );
 
-    let src_metadata = FileMetaData::try_new(source_file);
-
-    if destination_file.exists() {
-        if let (Some(src_metadata), Some(dest_metadata)) =
-            (&src_metadata, FileMetaData::try_new(destination_file))
-        {
-            if *src_metadata == dest_metadata {
-                if let (Some(src_hash), Some(dest_hash)) =
-                    (get_hash(source_file), get_hash(destination_file))
-                {
-                    if src_hash == dest_hash {
-                        println!(
-                            "Skipping \"{}\" as destination file \"{}\" is still up to date. ",
-                            source_file.display(),
-                            destination_file.display()
-                        );
-                        return Ok(());
-                    }
-                } else {
-                    eprintln!(
-                        "WARNING: Cannot get hash of either {} or {}. We just try to copy the file anyway.",
-                        source_file.display(),
-                        destination_file.display()
-                    );
-                }
-            }
-        } else {
-            eprintln!(
-                "WARNING: Cannot read all metadata of either {} or {}. We just try to copy the file anyway.",
-                source_file.display(),
-                destination_file.display()
-            );
-        }
+    let source_metadata = FileMetaData::try_new(source_file);
+    if skip_copy(source_file, destination_file, &source_metadata) {
+        return Ok(());
     }
 
     println!(
@@ -340,18 +354,11 @@ fn copy_if_newer(
         source_file.display(),
         destination_file.display()
     );
-    if let Err(e) = std::fs::copy(source_file, destination_file) {
-        return Err(CoreError::CannotCopyFile(
-            source_file.into(),
-            destination_file.into(),
-            e,
-        ));
-    }
-    if let Some(src_metadata) = src_metadata
-        && set_modified(&src_metadata, destination_file).is_none()
-    {
+    std::fs::copy(source_file, destination_file)
+        .map_err(|e| CoreError::CannotCopyFile(source_file.into(), destination_file.into(), e))?;
+    if set_modified_time(&source_metadata, destination_file).is_none() {
         eprintln!(
-            "WARNING: Could not copy modified time from \"{}\" destination file \"{}\"",
+            "WARNING: Could not copy modified time from \"{}\" to destination file \"{}\"",
             source_file.display(),
             destination_file.display()
         );
@@ -360,33 +367,43 @@ fn copy_if_newer(
     Ok(())
 }
 
-fn set_modified(src_metadata: &FileMetaData, dest_path: &std::path::Path) -> Option<()> {
-    if let Some(modified) = src_metadata.modified {
-        let file = std::fs::File::open(dest_path).ok()?;
+fn set_modified_time(
+    source_metadata: &Option<FileMetaData>,
+    destination_file: &std::path::Path,
+) -> Option<()> {
+    if let Some(source_metadata) = source_metadata
+        && let Some(modified) = source_metadata.modified
+    {
+        let file = std::fs::File::open(destination_file).ok()?;
         file.set_modified(modified).ok()?;
     }
 
     Some(())
 }
 
-fn run(config: Config) -> std::vec::Vec<CoreError> {
-    if !config.source.exists() {
-        return vec![CoreError::SourcePathDoesNotExist(config.source)];
+fn run(config: Config) -> Vec<CoreError> {
+    if !config.source_directory.exists() {
+        return vec![CoreError::SourcePathDoesNotExist(config.source_directory)];
     }
-    if !config.destination.exists()
-        && let Err(e) = std::fs::create_dir_all(&config.destination)
+    if !config.destination_directory.exists()
+        && let Err(e) = std::fs::create_dir_all(&config.destination_directory)
     {
-        return vec![CoreError::CannotCreateDestinationDir(config.destination, e)];
+        return vec![CoreError::CannotCreateDestinationDir(
+            config.destination_directory,
+            e,
+        )];
     }
-    if !config.destination.is_dir() {
-        return vec![CoreError::DestinationIsNotADirectory(config.destination)];
+    if !config.destination_directory.is_dir() {
+        return vec![CoreError::DestinationIsNotADirectory(
+            config.destination_directory,
+        )];
     }
 
-    process_dir(&config.source, &config.destination)
+    backup_directory(&config.source_directory, &config.destination_directory)
 }
 
 #[inline]
-fn convert_to_error(errors: std::vec::Vec<CoreError>) -> Result<(), Error> {
+fn convert_to_error(errors: Vec<CoreError>) -> Result<(), Error> {
     if errors.is_empty() {
         Ok(())
     } else {
@@ -395,7 +412,7 @@ fn convert_to_error(errors: std::vec::Vec<CoreError>) -> Result<(), Error> {
 }
 
 #[inline]
-fn get_destination_path(
+fn get_destination_file_path(
     destination_root: &std::path::Path,
     source_root: &std::path::Path,
     source_path: &std::path::Path,
@@ -448,7 +465,7 @@ mod tests {
     #[test]
     fn test_iterate_test_dir() -> Result<(), CoreError> {
         let file_entry: FileEntry = TEST_DIR.into();
-        let files: Result<std::vec::Vec<_>, _> = file_entry.into_iter().collect();
+        let files: Result<Vec<_>, _> = file_entry.into_iter().collect();
         let files = files?;
         assert_eq!(files.len(), TEST_DIR_FILES.len());
         assert_eq!(
@@ -456,7 +473,7 @@ mod tests {
             TEST_DIR_FILES
                 .iter()
                 .map(std::path::Path::new)
-                .collect::<std::vec::Vec<_>>()
+                .collect::<Vec<_>>()
         );
         Ok(())
     }
@@ -471,7 +488,7 @@ mod tests {
 
     #[test]
     fn test_get_destination_path() -> Result<(), CoreError> {
-        let destination_path = get_destination_path(
+        let destination_path = get_destination_file_path(
             std::path::Path::new("destination/root"),
             std::path::Path::new("source/root"),
             std::path::Path::new("source/root/some/file.txt"),
@@ -481,7 +498,7 @@ mod tests {
             std::path::Path::new("destination/root/some/file.txt")
         );
 
-        let destination_path = get_destination_path(
+        let destination_path = get_destination_file_path(
             std::path::Path::new("destination/root"),
             std::path::Path::new("source/root"),
             std::path::Path::new("source/root/some/dir/"),
