@@ -35,31 +35,35 @@ struct RecurseDirectories {
 }
 
 impl TryFrom<&str> for RecurseDirectories {
-    type Error = CoreError;
+    type Error = (std::path::PathBuf, FileBackupError);
     fn try_from(directory: &str) -> Result<Self, Self::Error> {
         Self::try_from(std::path::Path::new(directory))
     }
 }
 
 impl TryFrom<&std::path::Path> for RecurseDirectories {
-    type Error = CoreError;
+    type Error = (std::path::PathBuf, FileBackupError);
 
     fn try_from(directory: &std::path::Path) -> Result<Self, Self::Error> {
-        let current_readdir = std::fs::read_dir(directory)
-            .map_err(|e| CoreError::CannotReadDirectoryContent(directory.into(), e))?;
+        let current_readdir = std::fs::read_dir(directory).map_err(|e| {
+            (
+                directory.to_owned(),
+                FileBackupError::CannotReadDirectoryContent(e),
+            )
+        })?;
         Ok(Self {
             current_readdir,
             next_readdirs: std::collections::VecDeque::new(),
-            current_dirpath: directory.into(),
+            current_dirpath: directory.to_owned(),
         })
     }
 }
 
 impl Iterator for RecurseDirectories {
-    type Item = Result<std::path::PathBuf, CoreError>;
+    type Item = Result<std::path::PathBuf, (std::path::PathBuf, FileBackupError)>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        use CoreError as E;
+        use FileBackupError as E;
         for entry in &mut self.current_readdir {
             match entry {
                 Ok(entry) => {
@@ -69,9 +73,9 @@ impl Iterator for RecurseDirectories {
                     }
                 }
                 Err(error) => {
-                    return Some(Err(E::CannotGetDirEntry(
+                    return Some(Err((
                         self.current_dirpath.clone(),
-                        error,
+                        E::CannotGetDirEntry(error),
                     )));
                 }
             }
@@ -89,7 +93,7 @@ impl Iterator for RecurseDirectories {
                     return Some(Ok(next_readdir));
                 }
                 Err(error) => {
-                    return Some(Err(E::CannotReadDirectoryContent(next_readdir, error)));
+                    return Some(Err((next_readdir, E::CannotReadDirectoryContent(error))));
                 }
             }
         }
@@ -112,31 +116,35 @@ struct RecurseFiles {
 }
 
 impl TryFrom<&str> for RecurseFiles {
-    type Error = CoreError;
+    type Error = (std::path::PathBuf, FileBackupError);
     fn try_from(directory: &str) -> Result<Self, Self::Error> {
         Self::try_from(std::path::Path::new(directory))
     }
 }
 
 impl TryFrom<&std::path::Path> for RecurseFiles {
-    type Error = CoreError;
+    type Error = (std::path::PathBuf, FileBackupError);
 
     fn try_from(directory: &std::path::Path) -> Result<Self, Self::Error> {
-        let current_readdir = std::fs::read_dir(directory)
-            .map_err(|e| CoreError::CannotReadDirectoryContent(directory.into(), e))?;
+        let current_readdir = std::fs::read_dir(directory).map_err(|e| {
+            (
+                directory.to_owned(),
+                FileBackupError::CannotReadDirectoryContent(e),
+            )
+        })?;
         Ok(Self {
             current_readdir,
             next_readdirs: std::collections::VecDeque::new(),
-            current_dirpath: directory.into(),
+            current_dirpath: directory.to_owned(),
         })
     }
 }
 
 impl Iterator for RecurseFiles {
-    type Item = Result<std::path::PathBuf, CoreError>;
+    type Item = Result<std::path::PathBuf, (std::path::PathBuf, FileBackupError)>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        use CoreError as E;
+        use FileBackupError as E;
         'drain_current_readdir: loop {
             for entry in &mut self.current_readdir {
                 match entry {
@@ -149,9 +157,9 @@ impl Iterator for RecurseFiles {
                         }
                     }
                     Err(error) => {
-                        return Some(Err(E::CannotGetDirEntry(
+                        return Some(Err((
                             self.current_dirpath.clone(),
-                            error,
+                            E::CannotGetDirEntry(error),
                         )));
                     }
                 }
@@ -169,7 +177,7 @@ impl Iterator for RecurseFiles {
                         continue 'drain_current_readdir;
                     }
                     Err(error) => {
-                        return Some(Err(E::CannotReadDirectoryContent(next_readdir, error)));
+                        return Some(Err((next_readdir, E::CannotReadDirectoryContent(error))));
                     }
                 }
             }
@@ -187,27 +195,21 @@ impl Iterator for RecurseFiles {
 }
 
 #[derive(Debug)]
-enum CoreError {
-    SourcePathDoesNotExist(std::path::PathBuf),
+enum FileBackupError {
     CannotCreateDestinationDir(std::path::PathBuf, std::io::Error),
-    DestinationIsNotADirectory(std::path::PathBuf),
-    CannotReadDirectoryContent(std::path::PathBuf, std::io::Error),
-    CannotGetDirEntry(std::path::PathBuf, std::io::Error),
-    DestinationForSourceDirExistsAsFile(std::path::PathBuf, std::path::PathBuf),
-    CannotCopyFile(std::path::PathBuf, std::path::PathBuf, std::io::Error),
+    CannotReadDirectoryContent(std::io::Error),
+    CannotGetDirEntry(std::io::Error),
+    DestinationForSourceDirExistsAsFile(std::path::PathBuf),
+    CannotCopyFile(std::path::PathBuf, std::io::Error),
     CouldNotGenerateDestinationPath(std::path::StripPrefixError),
 }
 
-impl std::error::Error for CoreError {}
+impl std::error::Error for FileBackupError {}
 
-impl std::fmt::Display for CoreError {
+impl std::fmt::Display for FileBackupError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            CoreError::SourcePathDoesNotExist(path) => {
-                write!(f, "Source path does not exist: \"{}\"", path.display())
-            }
-
-            CoreError::CannotCreateDestinationDir(path, error) => {
+            FileBackupError::CannotCreateDestinationDir(path, error) => {
                 write!(
                     f,
                     "Cannot create destination path \"{}\": {error}",
@@ -215,43 +217,29 @@ impl std::fmt::Display for CoreError {
                 )
             }
 
-            CoreError::DestinationIsNotADirectory(path) => {
-                write!(f, "Destination is not a directory: \"{}\"", path.display())
+            FileBackupError::CannotReadDirectoryContent(error) => {
+                write!(f, "Could not read source directory => {error}")
             }
 
-            CoreError::CannotReadDirectoryContent(path, error) => {
-                write!(
-                    f,
-                    "Could not read source directory \"{}\": {error}",
-                    path.display()
-                )
+            FileBackupError::CannotGetDirEntry(error) => {
+                write!(f, "Could not read entries of directory => {error}")
             }
 
-            CoreError::CannotGetDirEntry(path, error) => {
-                write!(
-                    f,
-                    "Could not read source directory \"{}\": {error}",
-                    path.display()
-                )
-            }
-
-            CoreError::DestinationForSourceDirExistsAsFile(source_path, destination_dir) => write!(
+            FileBackupError::DestinationForSourceDirExistsAsFile(destination_dir) => write!(
                 f,
-                "Could not create a new destination directory for path \"{}\" because destination already exists but not as a directory: \"{}\"",
-                source_path.display(),
+                "Could not create a new destination directory \"{}\" because destination already exists but not as a directory",
                 destination_dir.display()
             ),
 
-            CoreError::CannotCopyFile(source_file, destination_file, error) => write!(
+            FileBackupError::CannotCopyFile(destination_file, error) => write!(
                 f,
-                "Could not copy source \"{}\" to destination file \"{}\": {error}",
-                source_file.display(),
+                "Could not copy file to destination \"{}\" => {error}",
                 destination_file.display()
             ),
 
-            CoreError::CouldNotGenerateDestinationPath(strip_prefix_error) => write!(
+            FileBackupError::CouldNotGenerateDestinationPath(strip_prefix_error) => write!(
                 f,
-                "Could not generate destination path: {strip_prefix_error}"
+                "Could not generate destination path => {strip_prefix_error}"
             ),
         }
     }
@@ -260,7 +248,10 @@ impl std::fmt::Display for CoreError {
 #[derive(Debug)]
 enum Error {
     CliError(CliError),
-    CoreErrors(Vec<CoreError>),
+    FileBackupErrors(Vec<(std::path::PathBuf, FileBackupError)>),
+    SourceRootPathDoesNotExist(std::path::PathBuf),
+    CannotCreateRootDestinationDir(std::path::PathBuf, std::io::Error),
+    RootDestinatinIsNotADirectory(std::path::PathBuf),
 }
 
 impl From<CliError> for Error {
@@ -275,7 +266,24 @@ impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Error::CliError(cli_error) => cli_error.fmt(f),
-            Error::CoreErrors(errors) => errors.iter().try_for_each(|e| e.fmt(f)),
+            Error::FileBackupErrors(errors) => errors
+                .iter()
+                .try_for_each(|(p, e)| write!(f, "{}, {e}", p.display())),
+            Error::SourceRootPathDoesNotExist(path_buf) => write!(
+                f,
+                "The specified source directory \"{}\" does not exists",
+                path_buf.display()
+            ),
+            Error::CannotCreateRootDestinationDir(path_buf, error) => write!(
+                f,
+                "Cannot create a new destination directory \"{}\" => {error}",
+                path_buf.display()
+            ),
+            Error::RootDestinatinIsNotADirectory(path_buf) => write!(
+                f,
+                "Specified destination \"{}\" is not a directory but a file",
+                path_buf.display()
+            ),
         }
     }
 }
@@ -304,7 +312,7 @@ impl Config {
 fn backup_all_files(
     source_directory_root: &std::path::Path,
     destination_directory_root: &std::path::Path,
-) -> Vec<CoreError> {
+) -> Vec<(std::path::PathBuf, FileBackupError)> {
     debug_assert!(source_directory_root.is_dir(), "Source is not a dir");
     debug_assert!(
         destination_directory_root.is_dir(),
@@ -340,7 +348,7 @@ fn backup_single_file(
     source_directory_root: &std::path::Path,
     destination_directory_root: &std::path::Path,
     source_file: std::path::PathBuf,
-) -> Result<(), CoreError> {
+) -> Result<(), (std::path::PathBuf, FileBackupError)> {
     debug_assert!(!source_file.is_dir(), "Must be a file or a symbolic link");
 
     let new_destination_file = get_destination_file_path(
@@ -356,7 +364,7 @@ fn backup_single_file(
 fn create_all_directories_in_destination(
     source_directory_root: &std::path::Path,
     destination_directory_root: &std::path::Path,
-) -> Vec<CoreError> {
+) -> Vec<(std::path::PathBuf, FileBackupError)> {
     debug_assert!(source_directory_root.is_dir(), "Source is not a dir");
     debug_assert!(
         destination_directory_root.is_dir(),
@@ -392,7 +400,7 @@ fn create_single_directory(
     source_directory_root: &std::path::Path,
     destination_directory_root: &std::path::Path,
     source_directory: std::path::PathBuf,
-) -> Result<(), CoreError> {
+) -> Result<(), (std::path::PathBuf, FileBackupError)> {
     debug_assert!(source_directory.is_dir(), "Must be a directory");
     let new_destination_file = get_destination_file_path(
         destination_directory_root,
@@ -405,14 +413,18 @@ fn create_single_directory(
         if new_destination_file.is_dir() {
             Ok(())
         } else {
-            Err(CoreError::DestinationForSourceDirExistsAsFile(
+            Err((
                 source_directory,
-                new_destination_file,
+                FileBackupError::DestinationForSourceDirExistsAsFile(new_destination_file),
             ))
         }
     } else {
-        std::fs::create_dir(&new_destination_file)
-            .map_err(|e| CoreError::CannotCreateDestinationDir(new_destination_file, e))
+        std::fs::create_dir(&new_destination_file).map_err(|e| {
+            (
+                source_directory,
+                FileBackupError::CannotCreateDestinationDir(new_destination_file, e),
+            )
+        })
     }
 }
 
@@ -487,7 +499,7 @@ fn skip_copy(
 fn copy_if_newer(
     source_file: &std::path::Path,
     destination_file: &std::path::Path,
-) -> Result<(), CoreError> {
+) -> Result<(), (std::path::PathBuf, FileBackupError)> {
     debug_assert!(
         !source_file.is_dir(),
         "Source file must not be a directory."
@@ -512,8 +524,12 @@ fn copy_if_newer(
         source_file.display(),
         destination_file.display()
     );
-    std::fs::copy(source_file, destination_file)
-        .map_err(|e| CoreError::CannotCopyFile(source_file.into(), destination_file.into(), e))?;
+    std::fs::copy(source_file, destination_file).map_err(|e| {
+        (
+            source_file.to_owned(),
+            FileBackupError::CannotCopyFile(destination_file.to_owned(), e),
+        )
+    })?;
     if set_modified_time(&source_metadata, destination_file).is_none() {
         eprintln!(
             "WARNING: Could not copy modified time from \"{}\" to destination file \"{}\"",
@@ -539,24 +555,24 @@ fn set_modified_time(
     Some(())
 }
 
-fn run(config: Config) -> Vec<CoreError> {
+fn run(config: Config) -> Result<(), Error> {
     if !config.source_directory_root.exists() {
-        return vec![CoreError::SourcePathDoesNotExist(
+        return Err(Error::SourceRootPathDoesNotExist(
             config.source_directory_root,
-        )];
+        ));
     }
     if !config.destination_directory_root.exists()
         && let Err(e) = std::fs::create_dir_all(&config.destination_directory_root)
     {
-        return vec![CoreError::CannotCreateDestinationDir(
+        return Err(Error::CannotCreateRootDestinationDir(
             config.destination_directory_root,
             e,
-        )];
+        ));
     }
     if !config.destination_directory_root.is_dir() {
-        return vec![CoreError::DestinationIsNotADirectory(
+        return Err(Error::RootDestinatinIsNotADirectory(
             config.destination_directory_root,
-        )];
+        ));
     }
 
     let mut errors = vec![];
@@ -571,15 +587,10 @@ fn run(config: Config) -> Vec<CoreError> {
         &config.destination_directory_root,
     ));
 
-    errors
-}
-
-#[inline]
-fn convert_to_error(errors: Vec<CoreError>) -> Result<(), Error> {
     if errors.is_empty() {
         Ok(())
     } else {
-        Err(Error::CoreErrors(errors))
+        Err(Error::FileBackupErrors(errors))
     }
 }
 
@@ -588,17 +599,20 @@ fn get_destination_file_path(
     destination_root: &std::path::Path,
     source_root: &std::path::Path,
     source_path: &std::path::Path,
-) -> Result<std::path::PathBuf, CoreError> {
-    let path_end = source_path
-        .strip_prefix(source_root)
-        .map_err(CoreError::CouldNotGenerateDestinationPath)?;
+) -> Result<std::path::PathBuf, (std::path::PathBuf, FileBackupError)> {
+    let path_end = source_path.strip_prefix(source_root).map_err(|e| {
+        (
+            source_path.to_owned(),
+            FileBackupError::CouldNotGenerateDestinationPath(e),
+        )
+    })?;
 
     Ok([destination_root, path_end].iter().collect())
 }
 
 fn cli() -> Result<(), Error> {
     let config = Config::try_from_cli()?;
-    convert_to_error(run(config))
+    run(config)
 }
 
 fn main() -> std::process::ExitCode {
@@ -640,7 +654,7 @@ mod tests {
     ];
 
     #[test]
-    fn test_recurse_files() -> Result<(), CoreError> {
+    fn test_recurse_files() -> Result<(), (std::path::PathBuf, FileBackupError)> {
         let file_entry = RecurseFiles::try_from(TEST_DIR)?;
         let files: Result<Vec<_>, _> = file_entry.into_iter().collect();
         let files = files?;
@@ -660,7 +674,7 @@ mod tests {
         assert!(file_entry.is_err());
     }
     #[test]
-    fn test_recurse_directories() -> Result<(), CoreError> {
+    fn test_recurse_directories() -> Result<(), (std::path::PathBuf, FileBackupError)> {
         let file_entry = RecurseDirectories::try_from(TEST_DIR)?;
         let files: Result<Vec<_>, _> = file_entry.into_iter().collect();
         let files = files?;
@@ -681,7 +695,7 @@ mod tests {
     }
 
     #[test]
-    fn test_get_destination_path() -> Result<(), CoreError> {
+    fn test_get_destination_path() -> Result<(), (std::path::PathBuf, FileBackupError)> {
         let destination_path = get_destination_file_path(
             std::path::Path::new("destination/root"),
             std::path::Path::new("source/root"),
