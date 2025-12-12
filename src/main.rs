@@ -289,9 +289,16 @@ impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Error::CliError(cli_error) => cli_error.fmt(f),
-            Error::FileBackupErrors(errors) => errors
-                .iter()
-                .try_for_each(|(p, e)| write!(f, "{}, {e}", p.display())),
+            Error::FileBackupErrors(errors) => {
+                errors.iter().enumerate().try_for_each(|(i, (p, e))| {
+                    let end = if i == errors.len() - 1 { "" } else { "\n" };
+                    write!(
+                        f,
+                        "Could not backup for path \"{}\" => {e}{end}",
+                        p.display()
+                    )
+                })
+            }
             Error::SourceRootPathDoesNotExist(path_buf) => write!(
                 f,
                 "The specified source directory \"{}\" does not exists",
@@ -340,6 +347,7 @@ impl Config {
 fn backup_all_files(
     source_recurse_files: RecurseFiles,
     destination_directory_root: &std::path::Path,
+    not_existing_destination_directories: Vec<&std::path::Path>,
 ) -> Vec<(std::path::PathBuf, FileBackupError)> {
     debug_assert!(
         source_recurse_files.root_directory().is_dir(),
@@ -355,6 +363,14 @@ fn backup_all_files(
     for source_file in source_recurse_files {
         match source_file {
             Ok(source_file) => {
+                if not_existing_destination_directories
+                    .iter()
+                    .any(|d| source_file.starts_with(d))
+                {
+                    // Do not try to copy files for directories that do not exist
+                    continue;
+                }
+
                 if let Err(err) = backup_single_file(
                     &source_directory_root,
                     destination_directory_root,
@@ -404,6 +420,11 @@ fn create_all_directories_in_destination(
     for source_directory in source_recurse_directory {
         match source_directory {
             Ok(source_directory) => {
+                if errors.iter().any(|(d, _)| source_directory.starts_with(d)) {
+                    // Do do not recurse
+                    continue;
+                }
+
                 if let Err(err) = create_single_directory(
                     &source_directory_root,
                     destination_directory_root,
@@ -599,18 +620,20 @@ fn run(config: Config) -> Result<(), Error> {
 
     let source_recurse_directories = RecurseDirectories::try_from(&config.source_directory_root)?;
 
-    let mut errors = vec![];
-
-    errors.append(&mut create_all_directories_in_destination(
+    let mut errors = create_all_directories_in_destination(
         source_recurse_directories,
         &config.destination_directory_root,
-    ));
-    let source_recurse_files = RecurseFiles::try_from(&config.source_directory_root)?;
+    );
+    let non_exsting_destination_directories = errors.iter().map(|(p, _)| p.as_path()).collect();
 
-    errors.append(&mut backup_all_files(
+    let source_recurse_files = RecurseFiles::try_from(&config.source_directory_root)?;
+    let mut file_backup_errors = backup_all_files(
         source_recurse_files,
         &config.destination_directory_root,
-    ));
+        non_exsting_destination_directories,
+    );
+
+    errors.append(&mut file_backup_errors);
 
     if errors.is_empty() {
         Ok(())
