@@ -29,29 +29,39 @@ impl std::fmt::Display for CliError {
 }
 
 struct RecurseDirectories {
+    for_root: std::path::PathBuf,
     next_readdirs: std::collections::VecDeque<std::path::PathBuf>,
     current_readdir: std::fs::ReadDir,
     current_dirpath: std::path::PathBuf,
 }
+impl RecurseDirectories {
+    fn root_directory(&self) -> &std::path::Path {
+        self.for_root.as_ref()
+    }
+}
 
 impl TryFrom<&str> for RecurseDirectories {
-    type Error = (std::path::PathBuf, FileBackupError);
+    type Error = Error;
     fn try_from(directory: &str) -> Result<Self, Self::Error> {
         Self::try_from(std::path::Path::new(directory))
     }
 }
+impl TryFrom<&std::path::PathBuf> for RecurseDirectories {
+    type Error = Error;
+
+    fn try_from(value: &std::path::PathBuf) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_path())
+    }
+}
 
 impl TryFrom<&std::path::Path> for RecurseDirectories {
-    type Error = (std::path::PathBuf, FileBackupError);
+    type Error = Error;
 
     fn try_from(directory: &std::path::Path) -> Result<Self, Self::Error> {
-        let current_readdir = std::fs::read_dir(directory).map_err(|e| {
-            (
-                directory.to_owned(),
-                FileBackupError::CannotReadDirectoryContent(e),
-            )
-        })?;
+        let current_readdir = std::fs::read_dir(directory)
+            .map_err(|e| Error::CannotReadDirectoryContent(directory.to_owned(), e))?;
         Ok(Self {
+            for_root: directory.to_owned(),
             current_readdir,
             next_readdirs: std::collections::VecDeque::new(),
             current_dirpath: directory.to_owned(),
@@ -110,29 +120,41 @@ impl Iterator for RecurseDirectories {
 }
 
 struct RecurseFiles {
+    for_root: std::path::PathBuf,
     next_readdirs: std::collections::VecDeque<std::path::PathBuf>,
     current_readdir: std::fs::ReadDir,
     current_dirpath: std::path::PathBuf,
 }
 
+impl RecurseFiles {
+    fn root_directory(&self) -> &std::path::Path {
+        self.for_root.as_ref()
+    }
+}
+
 impl TryFrom<&str> for RecurseFiles {
-    type Error = (std::path::PathBuf, FileBackupError);
+    type Error = Error;
     fn try_from(directory: &str) -> Result<Self, Self::Error> {
         Self::try_from(std::path::Path::new(directory))
     }
 }
 
+impl TryFrom<&std::path::PathBuf> for RecurseFiles {
+    type Error = Error;
+
+    fn try_from(value: &std::path::PathBuf) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_path())
+    }
+}
+
 impl TryFrom<&std::path::Path> for RecurseFiles {
-    type Error = (std::path::PathBuf, FileBackupError);
+    type Error = Error;
 
     fn try_from(directory: &std::path::Path) -> Result<Self, Self::Error> {
-        let current_readdir = std::fs::read_dir(directory).map_err(|e| {
-            (
-                directory.to_owned(),
-                FileBackupError::CannotReadDirectoryContent(e),
-            )
-        })?;
+        let current_readdir = std::fs::read_dir(directory)
+            .map_err(|e| Error::CannotReadDirectoryContent(directory.to_owned(), e))?;
         Ok(Self {
+            for_root: directory.to_owned(),
             current_readdir,
             next_readdirs: std::collections::VecDeque::new(),
             current_dirpath: directory.to_owned(),
@@ -250,6 +272,7 @@ enum Error {
     CliError(CliError),
     FileBackupErrors(Vec<(std::path::PathBuf, FileBackupError)>),
     SourceRootPathDoesNotExist(std::path::PathBuf),
+    CannotReadDirectoryContent(std::path::PathBuf, std::io::Error),
     CannotCreateRootDestinationDir(std::path::PathBuf, std::io::Error),
     RootDestinatinIsNotADirectory(std::path::PathBuf),
 }
@@ -284,6 +307,11 @@ impl std::fmt::Display for Error {
                 "Specified destination \"{}\" is not a directory but a file",
                 path_buf.display()
             ),
+            Error::CannotReadDirectoryContent(path_buf, error) => write!(
+                f,
+                "Cannot iterate through directory\"{}\" => {error}",
+                path_buf.display()
+            ),
         }
     }
 }
@@ -310,28 +338,25 @@ impl Config {
 
 #[must_use]
 fn backup_all_files(
-    source_directory_root: &std::path::Path,
+    source_recurse_files: RecurseFiles,
     destination_directory_root: &std::path::Path,
 ) -> Vec<(std::path::PathBuf, FileBackupError)> {
-    debug_assert!(source_directory_root.is_dir(), "Source is not a dir");
+    debug_assert!(
+        source_recurse_files.root_directory().is_dir(),
+        "Source is not a dir"
+    );
     debug_assert!(
         destination_directory_root.is_dir(),
         "Destination is not a dir"
     );
 
-    let recurse_files = match RecurseFiles::try_from(source_directory_root) {
-        Ok(rf) => rf,
-        Err(e) => {
-            return vec![e];
-        }
-    };
-
     let mut errors = vec![];
-    for source_file in recurse_files {
+    let source_directory_root = source_recurse_files.root_directory().to_owned();
+    for source_file in source_recurse_files {
         match source_file {
             Ok(source_file) => {
                 if let Err(err) = backup_single_file(
-                    source_directory_root,
+                    &source_directory_root,
                     destination_directory_root,
                     source_file,
                 ) {
@@ -362,28 +387,25 @@ fn backup_single_file(
 
 #[must_use]
 fn create_all_directories_in_destination(
-    source_directory_root: &std::path::Path,
+    source_recurse_directory: RecurseDirectories,
     destination_directory_root: &std::path::Path,
 ) -> Vec<(std::path::PathBuf, FileBackupError)> {
-    debug_assert!(source_directory_root.is_dir(), "Source is not a dir");
+    debug_assert!(
+        source_recurse_directory.root_directory().is_dir(),
+        "Source is not a dir"
+    );
     debug_assert!(
         destination_directory_root.is_dir(),
         "Destination is not a dir"
     );
 
-    let recurse_directories = match RecurseDirectories::try_from(source_directory_root) {
-        Ok(rd) => rd,
-        Err(e) => {
-            return vec![e];
-        }
-    };
-
     let mut errors = vec![];
-    for source_directory in recurse_directories {
+    let source_directory_root = source_recurse_directory.root_directory().to_owned();
+    for source_directory in source_recurse_directory {
         match source_directory {
             Ok(source_directory) => {
                 if let Err(err) = create_single_directory(
-                    source_directory_root,
+                    &source_directory_root,
                     destination_directory_root,
                     source_directory,
                 ) {
@@ -575,15 +597,18 @@ fn run(config: Config) -> Result<(), Error> {
         ));
     }
 
+    let source_recurse_directories = RecurseDirectories::try_from(&config.source_directory_root)?;
+
     let mut errors = vec![];
 
     errors.append(&mut create_all_directories_in_destination(
-        &config.source_directory_root,
+        source_recurse_directories,
         &config.destination_directory_root,
     ));
+    let source_recurse_files = RecurseFiles::try_from(&config.source_directory_root)?;
 
     errors.append(&mut backup_all_files(
-        &config.source_directory_root,
+        source_recurse_files,
         &config.destination_directory_root,
     ));
 
@@ -654,10 +679,12 @@ mod tests {
     ];
 
     #[test]
-    fn test_recurse_files() -> Result<(), (std::path::PathBuf, FileBackupError)> {
-        let file_entry = RecurseFiles::try_from(TEST_DIR)?;
-        let files: Result<Vec<_>, _> = file_entry.into_iter().collect();
-        let files = files?;
+    fn test_recurse_files() {
+        let file_entry = RecurseFiles::try_from(TEST_DIR).unwrap();
+        let files = file_entry
+            .into_iter()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
         assert_eq!(files.len(), TEST_DIR_FILES.len());
         assert_eq!(
             files,
@@ -666,7 +693,6 @@ mod tests {
                 .map(std::path::Path::new)
                 .collect::<Vec<_>>()
         );
-        Ok(())
     }
     #[test]
     fn test_recurse_files_fail() {
@@ -674,10 +700,12 @@ mod tests {
         assert!(file_entry.is_err());
     }
     #[test]
-    fn test_recurse_directories() -> Result<(), (std::path::PathBuf, FileBackupError)> {
-        let file_entry = RecurseDirectories::try_from(TEST_DIR)?;
-        let files: Result<Vec<_>, _> = file_entry.into_iter().collect();
-        let files = files?;
+    fn test_recurse_directories() {
+        let file_entry = RecurseDirectories::try_from(TEST_DIR).unwrap();
+        let files = file_entry
+            .into_iter()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
         assert_eq!(files.len(), TEST_DIR_DIRECTORIES.len());
         assert_eq!(
             files,
@@ -686,7 +714,6 @@ mod tests {
                 .map(std::path::Path::new)
                 .collect::<Vec<_>>()
         );
-        Ok(())
     }
     #[test]
     fn test_recurse_directories_fail() {
@@ -695,12 +722,13 @@ mod tests {
     }
 
     #[test]
-    fn test_get_destination_path() -> Result<(), (std::path::PathBuf, FileBackupError)> {
+    fn test_get_destination_path() {
         let destination_path = get_destination_file_path(
             std::path::Path::new("destination/root"),
             std::path::Path::new("source/root"),
             std::path::Path::new("source/root/some/file.txt"),
-        )?;
+        )
+        .unwrap();
         assert_eq!(
             destination_path,
             std::path::Path::new("destination/root/some/file.txt")
@@ -710,12 +738,11 @@ mod tests {
             std::path::Path::new("destination/root"),
             std::path::Path::new("source/root"),
             std::path::Path::new("source/root/some/dir/"),
-        )?;
+        )
+        .unwrap();
         assert_eq!(
             destination_path,
             std::path::Path::new("destination/root/some/dir/")
         );
-
-        Ok(())
     }
 }
