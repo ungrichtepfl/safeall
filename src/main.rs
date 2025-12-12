@@ -28,37 +28,117 @@ impl std::fmt::Display for CliError {
     }
 }
 
-struct RecursiveReadDir {
+struct RecurseDirectories {
     next_readdirs: std::collections::VecDeque<std::path::PathBuf>,
-    current_readdir: Option<std::fs::ReadDir>,
+    current_readdir: std::fs::ReadDir,
     current_dirpath: std::path::PathBuf,
 }
 
-impl From<&str> for RecursiveReadDir {
-    fn from(path: &str) -> Self {
-        Self::from(std::path::Path::new(path))
+impl TryFrom<&str> for RecurseDirectories {
+    type Error = CoreError;
+    fn try_from(directory: &str) -> Result<Self, Self::Error> {
+        Self::try_from(std::path::Path::new(directory))
     }
 }
 
-impl From<&std::path::Path> for RecursiveReadDir {
-    fn from(path: &std::path::Path) -> Self {
-        let mut next_readdirs = std::collections::VecDeque::new();
-        next_readdirs.push_back(path.into());
-        Self {
-            current_readdir: None,
-            next_readdirs,
-            current_dirpath: path.into(),
-        }
+impl TryFrom<&std::path::Path> for RecurseDirectories {
+    type Error = CoreError;
+
+    fn try_from(directory: &std::path::Path) -> Result<Self, Self::Error> {
+        let current_readdir = std::fs::read_dir(directory)
+            .map_err(|e| CoreError::CannotReadDirectoryContent(directory.into(), e))?;
+        Ok(Self {
+            current_readdir,
+            next_readdirs: std::collections::VecDeque::new(),
+            current_dirpath: directory.into(),
+        })
     }
 }
 
-impl Iterator for RecursiveReadDir {
+impl Iterator for RecurseDirectories {
     type Item = Result<std::path::PathBuf, CoreError>;
 
     fn next(&mut self) -> Option<Self::Item> {
         use CoreError as E;
-        if let Some(current_readdir) = &mut self.current_readdir {
-            for entry in current_readdir {
+        for entry in &mut self.current_readdir {
+            match entry {
+                Ok(entry) => {
+                    let path = entry.path();
+                    if path.is_dir() {
+                        self.next_readdirs.push_back(path);
+                    }
+                }
+                Err(error) => {
+                    return Some(Err(E::CannotGetDirEntry(
+                        self.current_dirpath.clone(),
+                        error,
+                    )));
+                }
+            }
+        }
+        debug_assert!(
+            self.current_readdir.next().is_none(),
+            "The `current_readdir` must be empty so we can create a new one"
+        );
+        if let Some(next_readdir) = self.next_readdirs.pop_front() {
+            debug_assert!(next_readdir.is_dir(), "Must be a directory.");
+            match std::fs::read_dir(&next_readdir) {
+                Ok(readdir) => {
+                    self.current_readdir = readdir;
+                    self.current_dirpath = next_readdir.clone();
+                    return Some(Ok(next_readdir));
+                }
+                Err(error) => {
+                    return Some(Err(E::CannotReadDirectoryContent(next_readdir, error)));
+                }
+            }
+        }
+        debug_assert!(
+            self.current_readdir.next().is_none(),
+            "Current readdir must be empty"
+        );
+        debug_assert!(
+            self.next_readdirs.is_empty(),
+            "Next readdirs must be empty."
+        );
+        None
+    }
+}
+
+struct RecurseFiles {
+    next_readdirs: std::collections::VecDeque<std::path::PathBuf>,
+    current_readdir: std::fs::ReadDir,
+    current_dirpath: std::path::PathBuf,
+}
+
+impl TryFrom<&str> for RecurseFiles {
+    type Error = CoreError;
+    fn try_from(directory: &str) -> Result<Self, Self::Error> {
+        Self::try_from(std::path::Path::new(directory))
+    }
+}
+
+impl TryFrom<&std::path::Path> for RecurseFiles {
+    type Error = CoreError;
+
+    fn try_from(directory: &std::path::Path) -> Result<Self, Self::Error> {
+        let current_readdir = std::fs::read_dir(directory)
+            .map_err(|e| CoreError::CannotReadDirectoryContent(directory.into(), e))?;
+        Ok(Self {
+            current_readdir,
+            next_readdirs: std::collections::VecDeque::new(),
+            current_dirpath: directory.into(),
+        })
+    }
+}
+
+impl Iterator for RecurseFiles {
+    type Item = Result<std::path::PathBuf, CoreError>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        use CoreError as E;
+        'drain_current_readdir: loop {
+            for entry in &mut self.current_readdir {
                 match entry {
                     Ok(entry) => {
                         let path = entry.path();
@@ -76,36 +156,33 @@ impl Iterator for RecursiveReadDir {
                     }
                 }
             }
-        }
-        debug_assert!(
-            self.current_readdir
-                .as_mut()
-                .is_none_or(|r| r.next().is_none()),
-            "The part above must have drained the current readdir, so we can create a new one below"
-        );
-        if let Some(next_readdir) = self.next_readdirs.pop_front() {
-            match std::fs::read_dir(&next_readdir) {
-                Ok(readdir) => {
-                    self.current_readdir = Some(readdir);
-                    self.current_dirpath = next_readdir.clone();
-                    return Some(Ok(next_readdir));
-                }
-                Err(error) => {
-                    return Some(Err(E::CannotReadDirectoryContent(next_readdir, error)));
+            debug_assert!(
+                self.current_readdir.next().is_none(),
+                "The `current_readdir` must be empty so we can create a new one"
+            );
+            if let Some(next_readdir) = self.next_readdirs.pop_front() {
+                debug_assert!(next_readdir.is_dir(), "Must be a directory.");
+                match std::fs::read_dir(&next_readdir) {
+                    Ok(readdir) => {
+                        self.current_readdir = readdir;
+                        self.current_dirpath = next_readdir;
+                        continue 'drain_current_readdir;
+                    }
+                    Err(error) => {
+                        return Some(Err(E::CannotReadDirectoryContent(next_readdir, error)));
+                    }
                 }
             }
+            debug_assert!(
+                self.current_readdir.next().is_none(),
+                "Current readdir must be empty"
+            );
+            debug_assert!(
+                self.next_readdirs.is_empty(),
+                "Next readdirs must be empty."
+            );
+            return None;
         }
-        debug_assert!(
-            self.next_readdirs.is_empty(),
-            "Next readdirs must be empty."
-        );
-        debug_assert!(
-            self.current_readdir
-                .as_mut()
-                .is_none_or(|r| r.next().is_none()),
-            "Current readdir must be empty too."
-        );
-        None
     }
 }
 
@@ -127,7 +204,7 @@ impl std::fmt::Display for CoreError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             CoreError::SourcePathDoesNotExist(path) => {
-                write!(f, "Source path does not exist: {}", path.display())
+                write!(f, "Source path does not exist: \"{}\"", path.display())
             }
 
             CoreError::CannotCreateDestinationDir(path, error) => {
@@ -139,7 +216,7 @@ impl std::fmt::Display for CoreError {
             }
 
             CoreError::DestinationIsNotADirectory(path) => {
-                write!(f, "Destination is not a directory: {}", path.display())
+                write!(f, "Destination is not a directory: \"{}\"", path.display())
             }
 
             CoreError::CannotReadDirectoryContent(path, error) => {
@@ -160,7 +237,7 @@ impl std::fmt::Display for CoreError {
 
             CoreError::DestinationForSourceDirExistsAsFile(source_path, destination_dir) => write!(
                 f,
-                "Could not create a new destination directory for path \"{}\" because destination already exists but not as a directory: {}",
+                "Could not create a new destination directory for path \"{}\" because destination already exists but not as a directory: \"{}\"",
                 source_path.display(),
                 destination_dir.display()
             ),
@@ -205,8 +282,8 @@ impl std::fmt::Display for Error {
 
 #[derive(Debug)]
 struct Config {
-    source_directory: std::path::PathBuf,
-    destination_directory: std::path::PathBuf,
+    source_directory_root: std::path::PathBuf,
+    destination_directory_root: std::path::PathBuf,
 }
 
 impl Config {
@@ -217,26 +294,39 @@ impl Config {
             .map_err(|args: Vec<_>| CliError::WrongNumberOfArguments(args.len()))?;
 
         Ok(Self {
-            source_directory: source_directory.into(),
-            destination_directory: destination_directory.into(),
+            source_directory_root: source_directory.into(),
+            destination_directory_root: destination_directory.into(),
         })
     }
 }
 
 #[must_use]
-fn backup_directory(
-    source_directory: &std::path::Path,
-    destination_directory: &std::path::Path,
+fn backup_all_files(
+    source_directory_root: &std::path::Path,
+    destination_directory_root: &std::path::Path,
 ) -> Vec<CoreError> {
-    debug_assert!(source_directory.is_dir(), "Source is not a dir");
-    debug_assert!(destination_directory.is_dir(), "Destination is not a dir");
-    let mut errors = vec![];
+    debug_assert!(source_directory_root.is_dir(), "Source is not a dir");
+    debug_assert!(
+        destination_directory_root.is_dir(),
+        "Destination is not a dir"
+    );
 
-    for source_file in RecursiveReadDir::from(source_directory) {
+    let recurse_files = match RecurseFiles::try_from(source_directory_root) {
+        Ok(rf) => rf,
+        Err(e) => {
+            return vec![e];
+        }
+    };
+
+    let mut errors = vec![];
+    for source_file in recurse_files {
         match source_file {
             Ok(source_file) => {
-                if let Err(err) = backup_file(source_directory, destination_directory, source_file)
-                {
+                if let Err(err) = backup_single_file(
+                    source_directory_root,
+                    destination_directory_root,
+                    source_file,
+                ) {
                     errors.push(err);
                 }
             }
@@ -246,32 +336,84 @@ fn backup_directory(
     errors
 }
 
-fn backup_file(
-    source_directory: &std::path::Path,
-    destination_directory: &std::path::Path,
+fn backup_single_file(
+    source_directory_root: &std::path::Path,
+    destination_directory_root: &std::path::Path,
     source_file: std::path::PathBuf,
 ) -> Result<(), CoreError> {
-    let new_destination_file =
-        get_destination_file_path(destination_directory, source_directory, &source_file)?;
+    debug_assert!(!source_file.is_dir(), "Must be a file or a symbolic link");
 
-    if !source_file.is_dir() {
-        // Is a file or a symbolic link
-        return copy_if_newer(&source_file, &new_destination_file);
+    let new_destination_file = get_destination_file_path(
+        destination_directory_root,
+        source_directory_root,
+        &source_file,
+    )?;
+
+    copy_if_newer(&source_file, &new_destination_file)
+}
+
+#[must_use]
+fn create_all_directories_in_destination(
+    source_directory_root: &std::path::Path,
+    destination_directory_root: &std::path::Path,
+) -> Vec<CoreError> {
+    debug_assert!(source_directory_root.is_dir(), "Source is not a dir");
+    debug_assert!(
+        destination_directory_root.is_dir(),
+        "Destination is not a dir"
+    );
+
+    let recurse_directories = match RecurseDirectories::try_from(source_directory_root) {
+        Ok(rd) => rd,
+        Err(e) => {
+            return vec![e];
+        }
+    };
+
+    let mut errors = vec![];
+    for source_directory in recurse_directories {
+        match source_directory {
+            Ok(source_directory) => {
+                if let Err(err) = create_single_directory(
+                    source_directory_root,
+                    destination_directory_root,
+                    source_directory,
+                ) {
+                    errors.push(err);
+                }
+            }
+            Err(err) => errors.push(err),
+        }
     }
-    // It is a dir
-    if !new_destination_file.exists() {
-        return std::fs::create_dir(&new_destination_file)
-            .map_err(|e| CoreError::CannotCreateDestinationDir(new_destination_file, e));
+    errors
+}
+
+fn create_single_directory(
+    source_directory_root: &std::path::Path,
+    destination_directory_root: &std::path::Path,
+    source_directory: std::path::PathBuf,
+) -> Result<(), CoreError> {
+    debug_assert!(source_directory.is_dir(), "Must be a directory");
+    let new_destination_file = get_destination_file_path(
+        destination_directory_root,
+        source_directory_root,
+        &source_directory,
+    )?;
+
+    if new_destination_file.exists() {
+        // If it already exists it must be a directory too
+        if new_destination_file.is_dir() {
+            Ok(())
+        } else {
+            Err(CoreError::DestinationForSourceDirExistsAsFile(
+                source_directory,
+                new_destination_file,
+            ))
+        }
+    } else {
+        std::fs::create_dir(&new_destination_file)
+            .map_err(|e| CoreError::CannotCreateDestinationDir(new_destination_file, e))
     }
-    // It already exists
-    if !new_destination_file.is_dir() {
-        // If it exists it must be a directory too
-        return Err(CoreError::DestinationForSourceDirExistsAsFile(
-            source_file,
-            new_destination_file,
-        ));
-    }
-    Ok(())
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -357,6 +499,11 @@ fn copy_if_newer(
 
     let source_metadata = FileMetaData::try_new(source_file);
     if skip_copy(source_file, destination_file, &source_metadata) {
+        println!(
+            "Not copying \"{}\" destination \"{}\" did not change.",
+            source_file.display(),
+            destination_file.display()
+        );
         return Ok(());
     }
 
@@ -393,24 +540,38 @@ fn set_modified_time(
 }
 
 fn run(config: Config) -> Vec<CoreError> {
-    if !config.source_directory.exists() {
-        return vec![CoreError::SourcePathDoesNotExist(config.source_directory)];
+    if !config.source_directory_root.exists() {
+        return vec![CoreError::SourcePathDoesNotExist(
+            config.source_directory_root,
+        )];
     }
-    if !config.destination_directory.exists()
-        && let Err(e) = std::fs::create_dir_all(&config.destination_directory)
+    if !config.destination_directory_root.exists()
+        && let Err(e) = std::fs::create_dir_all(&config.destination_directory_root)
     {
         return vec![CoreError::CannotCreateDestinationDir(
-            config.destination_directory,
+            config.destination_directory_root,
             e,
         )];
     }
-    if !config.destination_directory.is_dir() {
+    if !config.destination_directory_root.is_dir() {
         return vec![CoreError::DestinationIsNotADirectory(
-            config.destination_directory,
+            config.destination_directory_root,
         )];
     }
 
-    backup_directory(&config.source_directory, &config.destination_directory)
+    let mut errors = vec![];
+
+    errors.append(&mut create_all_directories_in_destination(
+        &config.source_directory_root,
+        &config.destination_directory_root,
+    ));
+
+    errors.append(&mut backup_all_files(
+        &config.source_directory_root,
+        &config.destination_directory_root,
+    ));
+
+    errors
 }
 
 #[inline]
@@ -454,28 +615,33 @@ mod tests {
 
     const WRONG_TEST_DIR: &str = "-------";
     const TEST_DIR: &str = "testdir";
-    const TEST_DIR_FILES: [&str; 16] = [
-        "testdir/",
+    const TEST_DIR_FILES: [&str; 12] = [
+        // TODO: Check if this order is the same on all platforms
         "testdir/03_a",
         "testdir/05_directory.csv",
         "testdir/04_test.py",
         "testdir/01_This.txt",
         "testdir/02_is.o",
-        "testdir/more/",
         "testdir/more/wèirder,name.txt",
         "testdir/more/weird name.txt",
-        "testdir/more2/",
         "testdir/more2/some more file",
         "testdir/more2/some file",
-        "testdir/more/even-möre/",
+        "testdir/more/even-mörer/all-solutions.bak",
         "testdir/more/even-möre/wèirder,name.txt",
-        "testdir/more2/moredir/",
         "testdir/more2/moredir/epic.file",
+    ];
+    const TEST_DIR_DIRECTORIES: [&str; 5] = [
+        // TODO: Check if this order is the same on all platforms
+        "testdir/more/",
+        "testdir/more2/",
+        "testdir/more/even-mörer",
+        "testdir/more/even-möre/",
+        "testdir/more2/moredir/",
     ];
 
     #[test]
-    fn test_iterate_test_dir() -> Result<(), CoreError> {
-        let file_entry: RecursiveReadDir = TEST_DIR.into();
+    fn test_recurse_files() -> Result<(), CoreError> {
+        let file_entry = RecurseFiles::try_from(TEST_DIR)?;
         let files: Result<Vec<_>, _> = file_entry.into_iter().collect();
         let files = files?;
         assert_eq!(files.len(), TEST_DIR_FILES.len());
@@ -489,12 +655,29 @@ mod tests {
         Ok(())
     }
     #[test]
-    fn test_file_entry_fail() {
-        let mut file_entry: RecursiveReadDir = WRONG_TEST_DIR.into();
-        let next_file_entry = file_entry.next();
-        assert!(next_file_entry.is_some());
-        assert!(next_file_entry.unwrap().is_err());
-        assert!(file_entry.next().is_none());
+    fn test_recurse_files_fail() {
+        let file_entry = RecurseFiles::try_from(WRONG_TEST_DIR);
+        assert!(file_entry.is_err());
+    }
+    #[test]
+    fn test_recurse_directories() -> Result<(), CoreError> {
+        let file_entry = RecurseDirectories::try_from(TEST_DIR)?;
+        let files: Result<Vec<_>, _> = file_entry.into_iter().collect();
+        let files = files?;
+        assert_eq!(files.len(), TEST_DIR_DIRECTORIES.len());
+        assert_eq!(
+            files,
+            TEST_DIR_DIRECTORIES
+                .iter()
+                .map(std::path::Path::new)
+                .collect::<Vec<_>>()
+        );
+        Ok(())
+    }
+    #[test]
+    fn test_recurse_directories_fail() {
+        let file_entry = RecurseDirectories::try_from(WRONG_TEST_DIR);
+        assert!(file_entry.is_err());
     }
 
     #[test]
