@@ -28,40 +28,33 @@ impl std::fmt::Display for CliError {
     }
 }
 
-struct RecurseDirectories {
+enum RecursiveReadDirKind {
+    DirectoriesOnly,
+    FilesOnly,
+}
+
+struct RecursiveReadDir {
     for_root: std::path::PathBuf,
+    kind: RecursiveReadDirKind,
     next_readdirs: std::collections::VecDeque<std::path::PathBuf>,
     current_readdir: std::fs::ReadDir,
     current_dirpath: std::path::PathBuf,
 }
-impl RecurseDirectories {
+
+impl RecursiveReadDir {
     fn root_directory(&self) -> &std::path::Path {
         self.for_root.as_ref()
     }
-}
 
-impl TryFrom<&str> for RecurseDirectories {
-    type Error = Error;
-    fn try_from(directory: &str) -> Result<Self, Self::Error> {
-        Self::try_from(std::path::Path::new(directory))
-    }
-}
-impl TryFrom<&std::path::PathBuf> for RecurseDirectories {
-    type Error = Error;
-
-    fn try_from(value: &std::path::PathBuf) -> Result<Self, Self::Error> {
-        Self::try_from(value.as_path())
-    }
-}
-
-impl TryFrom<&std::path::Path> for RecurseDirectories {
-    type Error = Error;
-
-    fn try_from(directory: &std::path::Path) -> Result<Self, Self::Error> {
-        let current_readdir = std::fs::read_dir(directory)
-            .map_err(|e| Error::CannotReadDirectoryContent(directory.to_owned(), e))?;
+    fn try_new<P: AsRef<std::path::Path>>(
+        directory: P,
+        kind: RecursiveReadDirKind,
+    ) -> Result<Self, std::io::Error> {
+        let directory: &std::path::Path = directory.as_ref();
+        let current_readdir = std::fs::read_dir(directory)?;
         Ok(Self {
             for_root: directory.to_owned(),
+            kind,
             current_readdir,
             next_readdirs: std::collections::VecDeque::new(),
             current_dirpath: directory.to_owned(),
@@ -69,100 +62,7 @@ impl TryFrom<&std::path::Path> for RecurseDirectories {
     }
 }
 
-impl Iterator for RecurseDirectories {
-    type Item = Result<std::path::PathBuf, (std::path::PathBuf, FileBackupError)>;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        use FileBackupError as E;
-        for entry in &mut self.current_readdir {
-            match entry {
-                Ok(entry) => {
-                    let path = entry.path();
-                    if path.is_dir() {
-                        self.next_readdirs.push_back(path);
-                    }
-                }
-                Err(error) => {
-                    return Some(Err((
-                        self.current_dirpath.clone(),
-                        E::CannotGetDirEntry(error),
-                    )));
-                }
-            }
-        }
-        debug_assert!(
-            self.current_readdir.next().is_none(),
-            "The `current_readdir` must be empty so we can create a new one"
-        );
-        if let Some(next_readdir) = self.next_readdirs.pop_front() {
-            debug_assert!(next_readdir.is_dir(), "Must be a directory.");
-            match std::fs::read_dir(&next_readdir) {
-                Ok(readdir) => {
-                    self.current_readdir = readdir;
-                    self.current_dirpath = next_readdir.clone();
-                    return Some(Ok(next_readdir));
-                }
-                Err(error) => {
-                    return Some(Err((next_readdir, E::CannotReadDirectoryContent(error))));
-                }
-            }
-        }
-        debug_assert!(
-            self.current_readdir.next().is_none(),
-            "Current readdir must be empty"
-        );
-        debug_assert!(
-            self.next_readdirs.is_empty(),
-            "Next readdirs must be empty."
-        );
-        None
-    }
-}
-
-struct RecurseFiles {
-    for_root: std::path::PathBuf,
-    next_readdirs: std::collections::VecDeque<std::path::PathBuf>,
-    current_readdir: std::fs::ReadDir,
-    current_dirpath: std::path::PathBuf,
-}
-
-impl RecurseFiles {
-    fn root_directory(&self) -> &std::path::Path {
-        self.for_root.as_ref()
-    }
-}
-
-impl TryFrom<&str> for RecurseFiles {
-    type Error = Error;
-    fn try_from(directory: &str) -> Result<Self, Self::Error> {
-        Self::try_from(std::path::Path::new(directory))
-    }
-}
-
-impl TryFrom<&std::path::PathBuf> for RecurseFiles {
-    type Error = Error;
-
-    fn try_from(value: &std::path::PathBuf) -> Result<Self, Self::Error> {
-        Self::try_from(value.as_path())
-    }
-}
-
-impl TryFrom<&std::path::Path> for RecurseFiles {
-    type Error = Error;
-
-    fn try_from(directory: &std::path::Path) -> Result<Self, Self::Error> {
-        let current_readdir = std::fs::read_dir(directory)
-            .map_err(|e| Error::CannotReadDirectoryContent(directory.to_owned(), e))?;
-        Ok(Self {
-            for_root: directory.to_owned(),
-            current_readdir,
-            next_readdirs: std::collections::VecDeque::new(),
-            current_dirpath: directory.to_owned(),
-        })
-    }
-}
-
-impl Iterator for RecurseFiles {
+impl Iterator for RecursiveReadDir {
     type Item = Result<std::path::PathBuf, (std::path::PathBuf, FileBackupError)>;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -174,7 +74,7 @@ impl Iterator for RecurseFiles {
                         let path = entry.path();
                         if path.is_dir() {
                             self.next_readdirs.push_back(path);
-                        } else {
+                        } else if matches!(self.kind, RecursiveReadDirKind::FilesOnly) {
                             return Some(Ok(path));
                         }
                     }
@@ -195,8 +95,11 @@ impl Iterator for RecurseFiles {
                 match std::fs::read_dir(&next_readdir) {
                     Ok(readdir) => {
                         self.current_readdir = readdir;
-                        self.current_dirpath = next_readdir;
-                        continue 'drain_current_readdir;
+                        self.current_dirpath = next_readdir.clone();
+                        match self.kind {
+                            RecursiveReadDirKind::FilesOnly => continue 'drain_current_readdir,
+                            RecursiveReadDirKind::DirectoriesOnly => return Some(Ok(next_readdir)),
+                        }
                     }
                     Err(error) => {
                         return Some(Err((next_readdir, E::CannotReadDirectoryContent(error))));
@@ -345,7 +248,7 @@ impl Config {
 
 #[must_use]
 fn backup_all_files(
-    source_recurse_files: RecurseFiles,
+    source_recurse_files: RecursiveReadDir,
     destination_directory_root: &std::path::Path,
     not_existing_destination_directories: Vec<&std::path::Path>,
 ) -> Vec<(std::path::PathBuf, FileBackupError)> {
@@ -403,11 +306,11 @@ fn backup_single_file(
 
 #[must_use]
 fn create_all_directories_in_destination(
-    source_recurse_directory: RecurseDirectories,
+    source_recurse_directories: RecursiveReadDir,
     destination_directory_root: &std::path::Path,
 ) -> Vec<(std::path::PathBuf, FileBackupError)> {
     debug_assert!(
-        source_recurse_directory.root_directory().is_dir(),
+        source_recurse_directories.root_directory().is_dir(),
         "Source is not a dir"
     );
     debug_assert!(
@@ -416,8 +319,8 @@ fn create_all_directories_in_destination(
     );
 
     let mut errors = vec![];
-    let source_directory_root = source_recurse_directory.root_directory().to_owned();
-    for source_directory in source_recurse_directory {
+    let source_directory_root = source_recurse_directories.root_directory().to_owned();
+    for source_directory in source_recurse_directories {
         match source_directory {
             Ok(source_directory) => {
                 if errors.iter().any(|(d, _)| source_directory.starts_with(d)) {
@@ -618,7 +521,11 @@ fn run(config: Config) -> Result<(), Error> {
         ));
     }
 
-    let source_recurse_directories = RecurseDirectories::try_from(&config.source_directory_root)?;
+    let source_recurse_directories = RecursiveReadDir::try_new(
+        &config.source_directory_root,
+        RecursiveReadDirKind::DirectoriesOnly,
+    )
+    .map_err(|e| Error::CannotReadDirectoryContent(config.source_directory_root.clone(), e))?;
 
     let mut errors = create_all_directories_in_destination(
         source_recurse_directories,
@@ -626,7 +533,11 @@ fn run(config: Config) -> Result<(), Error> {
     );
     let non_exsting_destination_directories = errors.iter().map(|(p, _)| p.as_path()).collect();
 
-    let source_recurse_files = RecurseFiles::try_from(&config.source_directory_root)?;
+    let source_recurse_files = RecursiveReadDir::try_new(
+        &config.source_directory_root,
+        RecursiveReadDirKind::FilesOnly,
+    )
+    .map_err(|e| Error::CannotReadDirectoryContent(config.source_directory_root, e))?;
     let mut file_backup_errors = backup_all_files(
         source_recurse_files,
         &config.destination_directory_root,
@@ -703,7 +614,8 @@ mod tests {
 
     #[test]
     fn test_recurse_files() {
-        let file_entry = RecurseFiles::try_from(TEST_DIR).unwrap();
+        let file_entry =
+            RecursiveReadDir::try_new(TEST_DIR, RecursiveReadDirKind::FilesOnly).unwrap();
         let files = file_entry
             .into_iter()
             .collect::<Result<Vec<_>, _>>()
@@ -718,13 +630,9 @@ mod tests {
         );
     }
     #[test]
-    fn test_recurse_files_fail() {
-        let file_entry = RecurseFiles::try_from(WRONG_TEST_DIR);
-        assert!(file_entry.is_err());
-    }
-    #[test]
     fn test_recurse_directories() {
-        let file_entry = RecurseDirectories::try_from(TEST_DIR).unwrap();
+        let file_entry =
+            RecursiveReadDir::try_new(TEST_DIR, RecursiveReadDirKind::DirectoriesOnly).unwrap();
         let files = file_entry
             .into_iter()
             .collect::<Result<Vec<_>, _>>()
@@ -739,8 +647,11 @@ mod tests {
         );
     }
     #[test]
-    fn test_recurse_directories_fail() {
-        let file_entry = RecurseDirectories::try_from(WRONG_TEST_DIR);
+    fn test_recursive_readdir_fail() {
+        let file_entry =
+            RecursiveReadDir::try_new(WRONG_TEST_DIR, RecursiveReadDirKind::DirectoriesOnly);
+        assert!(file_entry.is_err());
+        let file_entry = RecursiveReadDir::try_new(WRONG_TEST_DIR, RecursiveReadDirKind::FilesOnly);
         assert!(file_entry.is_err());
     }
 
