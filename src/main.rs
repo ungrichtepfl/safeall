@@ -1,3 +1,6 @@
+use rayon::iter::ParallelBridge;
+use rayon::prelude::ParallelIterator;
+
 const MAINTAINER_EMAIL: &str = "christoph.ungricht@outlook.com";
 
 #[derive(Debug)]
@@ -261,9 +264,9 @@ fn backup_all_files(
         "Destination is not a dir"
     );
 
-    let mut errors = vec![];
+    let errors = std::sync::Mutex::new(vec![]);
     let source_directory_root = source_recurse_files.root_directory().to_owned();
-    for source_file in source_recurse_files {
+    source_recurse_files.par_bridge().for_each(|source_file| {
         match source_file {
             Ok(source_file) => {
                 if not_existing_destination_directories
@@ -271,7 +274,7 @@ fn backup_all_files(
                     .any(|d| source_file.starts_with(d))
                 {
                     // Do not try to copy files for directories that do not exist
-                    continue;
+                    return;
                 }
 
                 if let Err(err) = backup_single_file(
@@ -279,13 +282,13 @@ fn backup_all_files(
                     destination_directory_root,
                     source_file,
                 ) {
-                    errors.push(err);
+                    errors.lock().unwrap().push(err);
                 }
             }
-            Err(err) => errors.push(err),
+            Err(err) => errors.lock().unwrap().push(err),
         }
-    }
-    errors
+    });
+    errors.into_inner().unwrap()
 }
 
 fn backup_single_file(
