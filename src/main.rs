@@ -1,10 +1,18 @@
 const MAINTAINER_EMAIL: &str = "christoph.ungricht@outlook.com";
 
 use clap::Parser;
+
+const STYLES: clap::builder::styling::Styles = clap::builder::styling::Styles::styled()
+    .header(clap::builder::styling::AnsiColor::Green.on_default().bold())
+    .usage(clap::builder::styling::AnsiColor::Green.on_default().bold())
+    .literal(clap::builder::styling::AnsiColor::Blue.on_default().bold())
+    .placeholder(clap::builder::styling::AnsiColor::Cyan.on_default());
+
 /// Backup or sync your filesystem to/from another folder.
 #[derive(clap::Parser)]
 #[command(version, about, long_about = None)]
 #[command(propagate_version = true)]
+#[command(styles=STYLES)]
 struct CliArgs {
     #[command(subcommand)]
     command: Commands,
