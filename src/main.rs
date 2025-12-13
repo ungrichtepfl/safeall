@@ -1,45 +1,53 @@
-use rayon::iter::ParallelBridge;
-use rayon::prelude::ParallelIterator;
-
 const MAINTAINER_EMAIL: &str = "christoph.ungricht@outlook.com";
 
-#[derive(Debug)]
-enum CliError {
-    WrongNumberOfArguments(usize),
+use clap::Parser;
+/// Backup or sync your filesystem to/from another folder.
+#[derive(clap::Parser)]
+#[command(version, about, long_about = None)]
+#[command(propagate_version = true)]
+struct CliArgs {
+    #[command(subcommand)]
+    command: Commands,
 }
 
-impl std::error::Error for CliError {}
-
-impl std::fmt::Display for CliError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            CliError::WrongNumberOfArguments(num) => {
-                if *num > 0 {
-                    write!(
-                        f,
-                        "Wrong number of arguments. Expected 2 found {}.",
-                        num - 1
-                    )
-                } else {
-                    write!(
-                        f,
-                        "Somehow this OS does not pass the program name as the first argument. Contact the maintainer to fix the program for your OS: {MAINTAINER_EMAIL}."
-                    )
-                }
-            }
-        }
-    }
+#[derive(clap::Subcommand)]
+enum Commands {
+    /// Backup files from source directory to destination directory.
+    /// It does not delete files in the destination directory.
+    Backup {
+        /// Folder which you want to backup
+        source_root: String,
+        /// Folder which will be your backup
+        destination_root: String,
+    },
+    /// Sync destination directory from source directory.
+    /// This delets files in the destination directory when they do not exist in the source directory.
+    Sync {
+        /// Folder which you want to backup
+        source_root: String,
+        /// Folder which will be your backup
+        destination_root: String,
+    },
+    /// Restore the source directory from the destination directory.
+    Restore {
+        /// Folder which you want to restore from the backup
+        source_root: String,
+        /// Folder where you have your backup
+        destination_root: String,
+        /// If you want to delete the files that are not in your backup
+        #[arg(short, long)]
+        delete_files: bool,
+    },
 }
 
-enum RecursiveReadDirKind {
+enum ReadDirType {
     DirectoriesOnly,
     FilesOnly,
-    DirectoriesAndFiles,
 }
 
 struct RecursiveReadDir {
     for_root: std::path::PathBuf,
-    kind: RecursiveReadDirKind,
+    readdir_type: ReadDirType,
     next_readdirs: std::collections::VecDeque<std::path::PathBuf>,
     current_readdir: std::fs::ReadDir,
     current_dirpath: std::path::PathBuf,
@@ -52,13 +60,13 @@ impl RecursiveReadDir {
 
     fn try_new<P: AsRef<std::path::Path>>(
         directory: P,
-        kind: RecursiveReadDirKind,
+        readdir_type: ReadDirType,
     ) -> Result<Self, std::io::Error> {
         let directory: &std::path::Path = directory.as_ref();
         let current_readdir = std::fs::read_dir(directory)?;
         Ok(Self {
             for_root: directory.to_owned(),
-            kind,
+            readdir_type,
             current_readdir,
             next_readdirs: std::collections::VecDeque::new(),
             current_dirpath: directory.to_owned(),
@@ -78,11 +86,7 @@ impl Iterator for RecursiveReadDir {
                         let path = entry.path();
                         if path.is_dir() {
                             self.next_readdirs.push_back(path);
-                        } else if matches!(
-                            self.kind,
-                            RecursiveReadDirKind::FilesOnly
-                                | RecursiveReadDirKind::DirectoriesAndFiles
-                        ) {
+                        } else if matches!(self.readdir_type, ReadDirType::FilesOnly) {
                             return Some(Ok(path));
                         }
                     }
@@ -104,10 +108,9 @@ impl Iterator for RecursiveReadDir {
                     Ok(readdir) => {
                         self.current_readdir = readdir;
                         self.current_dirpath = next_readdir.clone();
-                        match self.kind {
-                            RecursiveReadDirKind::FilesOnly => continue 'drain_current_readdir,
-                            RecursiveReadDirKind::DirectoriesOnly
-                            | RecursiveReadDirKind::DirectoriesAndFiles => {
+                        match self.readdir_type {
+                            ReadDirType::FilesOnly => continue 'drain_current_readdir,
+                            ReadDirType::DirectoriesOnly => {
                                 return Some(Ok(next_readdir));
                             }
                         }
@@ -139,6 +142,8 @@ enum InvariantError {
     ),
 }
 
+impl std::error::Error for InvariantError {}
+
 impl std::fmt::Display for InvariantError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -163,6 +168,8 @@ enum FileBackupError {
     CannotCopyFile(std::path::PathBuf, std::io::Error),
     CouldNotGenerateDestinationPath(std::path::StripPrefixError),
     InvariantBroken(InvariantError),
+    CannotDeleteDirectory(std::io::Error),
+    CannotDeleteFile(std::io::Error),
 }
 
 impl std::error::Error for FileBackupError {}
@@ -201,13 +208,16 @@ impl std::fmt::Display for FileBackupError {
                 f,
                 "There is some problem with the program. Contact the maintainer {MAINTAINER_EMAIL} to fix the error => {error}"
             ),
+            FileBackupError::CannotDeleteDirectory(error) => {
+                write!(f, "Cannot delet directory => {error}")
+            }
+            FileBackupError::CannotDeleteFile(error) => write!(f, "Cannot delete file => {error}"),
         }
     }
 }
 
 #[derive(Debug)]
 enum Error {
-    CliError(CliError),
     FileBackupErrors(Vec<(std::path::PathBuf, FileBackupError)>),
     SourceRootPathDoesNotExist(std::path::PathBuf),
     CannotReadDirectoryContent(std::path::PathBuf, std::io::Error),
@@ -215,18 +225,11 @@ enum Error {
     RootDestinatinIsNotADirectory(std::path::PathBuf),
 }
 
-impl From<CliError> for Error {
-    fn from(cli_error: CliError) -> Self {
-        Self::CliError(cli_error)
-    }
-}
-
 impl std::error::Error for Error {}
 
 impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Error::CliError(cli_error) => cli_error.fmt(f),
             Error::FileBackupErrors(errors) => {
                 errors.iter().enumerate().try_for_each(|(i, (p, e))| {
                     let end = if i == errors.len() - 1 { "" } else { "\n" };
@@ -261,26 +264,6 @@ impl std::fmt::Display for Error {
     }
 }
 
-#[derive(Debug)]
-struct Config {
-    source_directory_root: std::path::PathBuf,
-    destination_directory_root: std::path::PathBuf,
-}
-
-impl Config {
-    fn try_from_cli() -> Result<Self, CliError> {
-        let args: Vec<_> = std::env::args_os().collect();
-        let [_, source_directory, destination_directory] = args
-            .try_into()
-            .map_err(|args: Vec<_>| CliError::WrongNumberOfArguments(args.len()))?;
-
-        Ok(Self {
-            source_directory_root: source_directory.into(),
-            destination_directory_root: destination_directory.into(),
-        })
-    }
-}
-
 #[must_use]
 fn backup_all_files(
     source_recurse_files: RecursiveReadDir,
@@ -298,6 +281,9 @@ fn backup_all_files(
 
     let errors = std::sync::Mutex::new(vec![]);
     let source_directory_root = source_recurse_files.root_directory().to_owned();
+
+    use rayon::iter::ParallelBridge;
+    use rayon::prelude::ParallelIterator;
     source_recurse_files.par_bridge().for_each(|source_file| {
         match source_file {
             Ok(source_file) => {
@@ -595,47 +581,56 @@ fn get_paths_in_destinatination_but_not_in_source(
     }
     Ok(res)
 }
+fn validate_root_paths<P: AsRef<std::path::Path>>(
+    source_directory_root: P,
+    destination_directory_root: P,
+) -> Result<(), Error> {
+    let source_directory_root = source_directory_root.as_ref();
+    let destination_directory_root = destination_directory_root.as_ref();
 
-fn run(config: Config) -> Result<(), Error> {
-    if !config.source_directory_root.exists() {
+    if !source_directory_root.exists() {
         return Err(Error::SourceRootPathDoesNotExist(
-            config.source_directory_root,
+            source_directory_root.to_owned(),
         ));
     }
-    if !config.destination_directory_root.exists()
-        && let Err(e) = std::fs::create_dir_all(&config.destination_directory_root)
+    if !destination_directory_root.exists()
+        && let Err(e) = std::fs::create_dir_all(destination_directory_root)
     {
         return Err(Error::CannotCreateRootDestinationDir(
-            config.destination_directory_root,
+            destination_directory_root.to_owned(),
             e,
         ));
     }
-    if !config.destination_directory_root.is_dir() {
+    if !destination_directory_root.is_dir() {
         return Err(Error::RootDestinatinIsNotADirectory(
-            config.destination_directory_root,
+            destination_directory_root.to_owned(),
         ));
     }
+    Ok(())
+}
+fn backup<P: AsRef<std::path::Path>>(
+    source_directory_root: P,
+    destination_directory_root: P,
+) -> Result<(), Error> {
+    let source_directory_root = source_directory_root.as_ref();
+    let destination_directory_root = destination_directory_root.as_ref();
 
-    let source_recurse_directories = RecursiveReadDir::try_new(
-        &config.source_directory_root,
-        RecursiveReadDirKind::DirectoriesOnly,
-    )
-    .map_err(|e| Error::CannotReadDirectoryContent(config.source_directory_root.clone(), e))?;
+    let source_recurse_directories =
+        RecursiveReadDir::try_new(source_directory_root, ReadDirType::DirectoriesOnly)
+            .map_err(|e| Error::CannotReadDirectoryContent(source_directory_root.to_owned(), e))?;
 
     let mut errors = create_all_directories_in_destination(
         source_recurse_directories,
-        &config.destination_directory_root,
+        destination_directory_root,
     );
     let non_exsting_destination_directories = errors.iter().map(|(p, _)| p.as_path()).collect();
 
-    let source_recurse_files = RecursiveReadDir::try_new(
-        &config.source_directory_root,
-        RecursiveReadDirKind::FilesOnly,
-    )
-    .map_err(|e| Error::CannotReadDirectoryContent(config.source_directory_root, e))?;
+    let source_recurse_files =
+        RecursiveReadDir::try_new(source_directory_root, ReadDirType::FilesOnly)
+            .map_err(|e| Error::CannotReadDirectoryContent(source_directory_root.to_owned(), e))?;
     let mut file_backup_errors = backup_all_files(
         source_recurse_files,
-        &config.destination_directory_root,
+        destination_directory_root,
         non_exsting_destination_directories,
     );
 
@@ -645,6 +640,42 @@ fn run(config: Config) -> Result<(), Error> {
         Ok(())
     } else {
         Err(Error::FileBackupErrors(errors))
+    }
+}
+
+fn run(commands: Commands) -> Result<(), Error> {
+    match commands {
+        Commands::Backup {
+            source_root,
+            destination_root,
+        } => {
+            validate_root_paths(&source_root, &destination_root)?;
+            backup(&source_root, &destination_root)
+        }
+        Commands::Sync {
+            source_root,
+            destination_root,
+        } => {
+            validate_root_paths(&source_root, &destination_root)?;
+            // FIXME: Chaining is wrong for error propagation:
+            backup(&source_root, &destination_root)?;
+            purge_files_and_dirs_in_destination(&source_root, &destination_root)?;
+            Ok(())
+        }
+        Commands::Restore {
+            source_root,
+            destination_root,
+            delete_files,
+        } => {
+            validate_root_paths(&source_root, &destination_root)?;
+            // FIXME: Chaining is wrong for error propagation:
+            // NOTE: Same as sync but switch arguments
+            backup(&destination_root, &source_root)?;
+            if delete_files {
+                purge_files_and_dirs_in_destination(&destination_root, &source_root)?;
+            }
+            Ok(())
+        }
     }
 }
 
@@ -664,9 +695,73 @@ fn get_destination_file_path(
     Ok([destination_root, path_end].iter().collect())
 }
 
+fn purge_files_and_dirs_in_destination<P: AsRef<std::path::Path>>(
+    source_root: P,
+    destination_root: P,
+) -> Result<(), Error> {
+    let source_root = source_root.as_ref();
+    let destination_root = destination_root.as_ref();
+    let source_recurse_directories =
+        RecursiveReadDir::try_new(source_root, ReadDirType::DirectoriesOnly)
+            .map_err(|e| Error::CannotReadDirectoryContent(source_root.to_owned(), e))?;
+    let destination_recurse_directories =
+        RecursiveReadDir::try_new(destination_root, ReadDirType::DirectoriesOnly)
+            .map_err(|e| Error::CannotReadDirectoryContent(destination_root.to_owned(), e))?;
+
+    let dirs_to_delete = get_paths_in_destinatination_but_not_in_source(
+        source_recurse_directories,
+        destination_recurse_directories,
+    )
+    .map_err(|e| Error::FileBackupErrors(vec![e]))?;
+
+    let mut errors = vec![];
+    let mut deleted_dirs = vec![];
+    for dir in dirs_to_delete {
+        if deleted_dirs.iter().any(|d| dir.starts_with(d)) {
+            continue;
+        }
+        if let Err(e) = std::fs::remove_dir_all(&dir) {
+            errors.push((dir, FileBackupError::CannotDeleteDirectory(e)));
+        } else {
+            deleted_dirs.push(dir);
+        }
+    }
+
+    let source_recurse_files = RecursiveReadDir::try_new(source_root, ReadDirType::FilesOnly)
+        .map_err(|e| Error::CannotReadDirectoryContent(source_root.to_owned(), e))?;
+    let destination_recurse_files =
+        RecursiveReadDir::try_new(destination_root, ReadDirType::FilesOnly)
+            .map_err(|e| Error::CannotReadDirectoryContent(destination_root.to_owned(), e))?;
+
+    let files_to_delete = get_paths_in_destinatination_but_not_in_source(
+        source_recurse_files,
+        destination_recurse_files,
+    )
+    .map_err(|e| Error::FileBackupErrors(vec![e]))?;
+
+    use rayon::iter::IntoParallelIterator;
+    use rayon::prelude::ParallelIterator;
+    let errors_files = std::sync::Mutex::new(vec![]);
+    files_to_delete.into_par_iter().for_each(|file| {
+        if let Err(e) = std::fs::remove_file(&file) {
+            errors_files
+                .lock()
+                .unwrap()
+                .push((file, FileBackupError::CannotDeleteFile(e)));
+        }
+    });
+    let mut errors_file = errors_files.into_inner().unwrap();
+    if !errors.is_empty() || !errors_file.is_empty() {
+        errors.append(&mut errors_file);
+        Err(Error::FileBackupErrors(errors))
+    } else {
+        Ok(())
+    }
+}
+
 fn cli() -> Result<(), Error> {
-    let config = Config::try_from_cli()?;
-    run(config)
+    let cli_args = CliArgs::parse();
+    run(cli_args.command)
 }
 
 fn main() -> std::process::ExitCode {
@@ -684,26 +779,6 @@ mod tests {
     const WRONG_TEST_DIR: &str = "-------";
     const TEST_DIR: &str = "testdir";
     const TEST_DIR2: &str = "testdir2";
-    const TEST_DIR_FILES_AND_DIRECTORIES: [&str; 17] = [
-        // TODO: Check if this order is the same on all platforms
-        "testdir/03_a",
-        "testdir/05_directory.csv",
-        "testdir/04_test.py",
-        "testdir/01_This.txt",
-        "testdir/02_is.o",
-        "testdir/more/",
-        "testdir/more/wèirder,name.txt",
-        "testdir/more/weird name.txt",
-        "testdir/more2/",
-        "testdir/more2/some more file",
-        "testdir/more2/some file",
-        "testdir/more/even-mörer/",
-        "testdir/more/even-mörer/all-solutions.bak",
-        "testdir/more/even-möre/",
-        "testdir/more/even-möre/wèirder,name.txt",
-        "testdir/more2/moredir/",
-        "testdir/more2/moredir/epic.file",
-    ];
     const TEST_DIR_FILES: [&str; 12] = [
         // TODO: Check if this order is the same on all platforms
         "testdir/03_a",
@@ -730,8 +805,7 @@ mod tests {
 
     #[test]
     fn test_recurse_files() {
-        let file_entry =
-            RecursiveReadDir::try_new(TEST_DIR, RecursiveReadDirKind::FilesOnly).unwrap();
+        let file_entry = RecursiveReadDir::try_new(TEST_DIR, ReadDirType::FilesOnly).unwrap();
         let files = file_entry
             .into_iter()
             .collect::<Result<Vec<_>, _>>()
@@ -747,8 +821,7 @@ mod tests {
     }
     #[test]
     fn test_recurse_directories() {
-        let file_entry =
-            RecursiveReadDir::try_new(TEST_DIR, RecursiveReadDirKind::DirectoriesOnly).unwrap();
+        let file_entry = RecursiveReadDir::try_new(TEST_DIR, ReadDirType::DirectoriesOnly).unwrap();
         let files = file_entry
             .into_iter()
             .collect::<Result<Vec<_>, _>>()
@@ -763,31 +836,10 @@ mod tests {
         );
     }
     #[test]
-    fn test_recurse_directories_and_files() {
-        let file_entry =
-            RecursiveReadDir::try_new(TEST_DIR, RecursiveReadDirKind::DirectoriesAndFiles).unwrap();
-        let files = file_entry
-            .into_iter()
-            .collect::<Result<Vec<_>, _>>()
-            .unwrap();
-        assert_eq!(files.len(), TEST_DIR_FILES_AND_DIRECTORIES.len());
-        assert_eq!(
-            files,
-            TEST_DIR_FILES_AND_DIRECTORIES
-                .iter()
-                .map(std::path::Path::new)
-                .collect::<Vec<_>>()
-        );
-    }
-    #[test]
     fn test_recursive_readdir_fail() {
-        let file_entry =
-            RecursiveReadDir::try_new(WRONG_TEST_DIR, RecursiveReadDirKind::DirectoriesOnly);
+        let file_entry = RecursiveReadDir::try_new(WRONG_TEST_DIR, ReadDirType::DirectoriesOnly);
         assert!(file_entry.is_err());
-        let file_entry = RecursiveReadDir::try_new(WRONG_TEST_DIR, RecursiveReadDirKind::FilesOnly);
-        assert!(file_entry.is_err());
-        let file_entry =
-            RecursiveReadDir::try_new(WRONG_TEST_DIR, RecursiveReadDirKind::DirectoriesAndFiles);
+        let file_entry = RecursiveReadDir::try_new(WRONG_TEST_DIR, ReadDirType::FilesOnly);
         assert!(file_entry.is_err());
     }
 
@@ -819,9 +871,9 @@ mod tests {
     #[test]
     fn test_get_paths_in_destinatination_but_not_in_source_directories() {
         let recurse_testdir =
-            RecursiveReadDir::try_new(TEST_DIR, RecursiveReadDirKind::DirectoriesOnly).unwrap();
+            RecursiveReadDir::try_new(TEST_DIR, ReadDirType::DirectoriesOnly).unwrap();
         let recurse_testdir2 =
-            RecursiveReadDir::try_new(TEST_DIR2, RecursiveReadDirKind::DirectoriesOnly).unwrap();
+            RecursiveReadDir::try_new(TEST_DIR2, ReadDirType::DirectoriesOnly).unwrap();
         let res = get_paths_in_destinatination_but_not_in_source(recurse_testdir2, recurse_testdir)
             .unwrap();
 
@@ -835,10 +887,9 @@ mod tests {
 
     #[test]
     fn test_get_paths_in_destinatination_but_not_in_source_files() {
-        let recurse_testdir =
-            RecursiveReadDir::try_new(TEST_DIR, RecursiveReadDirKind::FilesOnly).unwrap();
+        let recurse_testdir = RecursiveReadDir::try_new(TEST_DIR, ReadDirType::FilesOnly).unwrap();
         let recurse_testdir2 =
-            RecursiveReadDir::try_new(TEST_DIR2, RecursiveReadDirKind::FilesOnly).unwrap();
+            RecursiveReadDir::try_new(TEST_DIR2, ReadDirType::FilesOnly).unwrap();
         let res = get_paths_in_destinatination_but_not_in_source(recurse_testdir2, recurse_testdir)
             .unwrap();
 
