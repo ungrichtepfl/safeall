@@ -473,30 +473,30 @@ fn copy_if_newer(
     );
     debug_assert!(
         !destination_file.is_dir(),
-        "Destiation file must not be a directory."
+        "Destinaion file must not be a directory."
     );
 
     let source_metadata = FileMetaData::try_new(source_file);
     if skip_copy(source_file, destination_file, &source_metadata) {
         println!(
-            "Not copying \"{}\" destination \"{}\" did not change.",
+            "Not copying \"{}\" as destination \"{}\" did not change.",
             source_file.display(),
             destination_file.display()
         );
         return Ok(());
     }
 
-    println!(
-        "Copy \"{}\" to \"{}\"",
-        source_file.display(),
-        destination_file.display()
-    );
     std::fs::copy(source_file, destination_file).map_err(|e| {
         (
             source_file.to_owned(),
             FileBackupError::CannotCopyFile(destination_file.to_owned(), e),
         )
     })?;
+    println!(
+        "Copied \"{}\" to \"{}\"",
+        source_file.display(),
+        destination_file.display()
+    );
     if set_modified_time(&source_metadata, destination_file).is_none() {
         eprintln!(
             "WARNING: Could not copy modified time from \"{}\" to destination file \"{}\"",
@@ -657,7 +657,6 @@ fn run(commands: Commands) -> Result<(), Error> {
             destination_root,
         } => {
             validate_root_paths(&source_root, &destination_root)?;
-            // FIXME: Chaining is wrong for error propagation:
             backup(&source_root, &destination_root)?;
             purge_files_and_dirs_in_destination(&source_root, &destination_root)?;
             Ok(())
@@ -668,7 +667,6 @@ fn run(commands: Commands) -> Result<(), Error> {
             delete_files,
         } => {
             validate_root_paths(&source_root, &destination_root)?;
-            // FIXME: Chaining is wrong for error propagation:
             // NOTE: Same as sync but switch arguments
             backup(&destination_root, &source_root)?;
             if delete_files {
@@ -723,6 +721,7 @@ fn purge_files_and_dirs_in_destination<P: AsRef<std::path::Path>>(
         if let Err(e) = std::fs::remove_dir_all(&dir) {
             errors.push((dir, FileBackupError::CannotDeleteDirectory(e)));
         } else {
+            println!("Deleted \"{}\"", dir.display());
             deleted_dirs.push(dir);
         }
     }
@@ -748,6 +747,8 @@ fn purge_files_and_dirs_in_destination<P: AsRef<std::path::Path>>(
                 .lock()
                 .unwrap()
                 .push((file, FileBackupError::CannotDeleteFile(e)));
+        } else {
+            println!("Deleted \"{}\"", file.display());
         }
     });
     let mut errors_file = errors_files.into_inner().unwrap();
