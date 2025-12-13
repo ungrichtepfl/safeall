@@ -34,6 +34,7 @@ impl std::fmt::Display for CliError {
 enum RecursiveReadDirKind {
     DirectoriesOnly,
     FilesOnly,
+    DirectoriesAndFiles,
 }
 
 struct RecursiveReadDir {
@@ -77,7 +78,11 @@ impl Iterator for RecursiveReadDir {
                         let path = entry.path();
                         if path.is_dir() {
                             self.next_readdirs.push_back(path);
-                        } else if matches!(self.kind, RecursiveReadDirKind::FilesOnly) {
+                        } else if matches!(
+                            self.kind,
+                            RecursiveReadDirKind::FilesOnly
+                                | RecursiveReadDirKind::DirectoriesAndFiles
+                        ) {
                             return Some(Ok(path));
                         }
                     }
@@ -101,7 +106,10 @@ impl Iterator for RecursiveReadDir {
                         self.current_dirpath = next_readdir.clone();
                         match self.kind {
                             RecursiveReadDirKind::FilesOnly => continue 'drain_current_readdir,
-                            RecursiveReadDirKind::DirectoriesOnly => return Some(Ok(next_readdir)),
+                            RecursiveReadDirKind::DirectoriesOnly
+                            | RecursiveReadDirKind::DirectoriesAndFiles => {
+                                return Some(Ok(next_readdir));
+                            }
                         }
                     }
                     Err(error) => {
@@ -123,6 +131,30 @@ impl Iterator for RecursiveReadDir {
 }
 
 #[derive(Debug)]
+enum InvariantError {
+    CannotStripPrefixOfPath(
+        std::path::PathBuf,
+        std::path::PathBuf,
+        std::path::StripPrefixError,
+    ),
+}
+
+impl std::fmt::Display for InvariantError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            InvariantError::CannotStripPrefixOfPath(path_root, path, strip_prefix_error) => {
+                write!(
+                    f,
+                    "Cannot strip prefix \"{}\" from \"{}\" => {strip_prefix_error}",
+                    path_root.display(),
+                    path.display()
+                )
+            }
+        }
+    }
+}
+
+#[derive(Debug)]
 enum FileBackupError {
     CannotCreateDestinationDir(std::path::PathBuf, std::io::Error),
     CannotReadDirectoryContent(std::io::Error),
@@ -130,6 +162,7 @@ enum FileBackupError {
     DestinationForSourceDirExistsAsFile(std::path::PathBuf),
     CannotCopyFile(std::path::PathBuf, std::io::Error),
     CouldNotGenerateDestinationPath(std::path::StripPrefixError),
+    InvariantBroken(InvariantError),
 }
 
 impl std::error::Error for FileBackupError {}
@@ -144,30 +177,29 @@ impl std::fmt::Display for FileBackupError {
                     path.display()
                 )
             }
-
             FileBackupError::CannotReadDirectoryContent(error) => {
                 write!(f, "Could not read source directory => {error}")
             }
-
             FileBackupError::CannotGetDirEntry(error) => {
                 write!(f, "Could not read entries of directory => {error}")
             }
-
             FileBackupError::DestinationForSourceDirExistsAsFile(destination_dir) => write!(
                 f,
                 "Could not create a new destination directory \"{}\" because destination already exists but not as a directory",
                 destination_dir.display()
             ),
-
             FileBackupError::CannotCopyFile(destination_file, error) => write!(
                 f,
                 "Could not copy file to destination \"{}\" => {error}",
                 destination_file.display()
             ),
-
             FileBackupError::CouldNotGenerateDestinationPath(strip_prefix_error) => write!(
                 f,
                 "Could not generate destination path => {strip_prefix_error}"
+            ),
+            FileBackupError::InvariantBroken(error) => write!(
+                f,
+                "There is some problem with the program. Contact the maintainer {MAINTAINER_EMAIL} to fix the error => {error}"
             ),
         }
     }
@@ -504,6 +536,66 @@ fn set_modified_time(
     Some(())
 }
 
+fn get_paths_in_destinatination_but_not_in_source(
+    mut recurse_source: RecursiveReadDir,
+    mut recurse_destination: RecursiveReadDir,
+) -> Result<Vec<std::path::PathBuf>, (std::path::PathBuf, FileBackupError)> {
+    let mut res = vec![];
+    let source_root = recurse_source.root_directory().to_owned();
+    'get_new_source: for source in recurse_source.by_ref() {
+        let source = source?;
+        let source_stripped = source.strip_prefix(&source_root).map_err(|e| {
+            (
+                source.to_owned(),
+                FileBackupError::InvariantBroken(InvariantError::CannotStripPrefixOfPath(
+                    source_root.to_owned(),
+                    source.to_owned(),
+                    e,
+                )),
+            )
+        })?;
+        'get_new_destination: loop {
+            if let Some(destination) = recurse_destination.next() {
+                let destination = destination?;
+                let destination_stripped = destination
+                    .strip_prefix(recurse_destination.root_directory())
+                    .map_err(|e| {
+                        (
+                            destination.to_owned(),
+                            FileBackupError::InvariantBroken(
+                                InvariantError::CannotStripPrefixOfPath(
+                                    recurse_destination.root_directory().to_owned(),
+                                    destination.to_owned(),
+                                    e,
+                                ),
+                            ),
+                        )
+                    })?;
+                if source_stripped != destination_stripped {
+                    res.push(destination);
+                    continue 'get_new_destination;
+                } else {
+                    continue 'get_new_source;
+                }
+            } else {
+                // No destination files left, break out
+                break 'get_new_source;
+            }
+        }
+    }
+
+    for destination in recurse_destination {
+        // If there are some destination files left they are all not in source:
+        debug_assert!(
+            recurse_source.next().is_none(),
+            "recurse_source must be empty."
+        );
+        let destination = destination?;
+        res.push(destination);
+    }
+    Ok(res)
+}
+
 fn run(config: Config) -> Result<(), Error> {
     if !config.source_directory_root.exists() {
         return Err(Error::SourceRootPathDoesNotExist(
@@ -591,6 +683,27 @@ mod tests {
 
     const WRONG_TEST_DIR: &str = "-------";
     const TEST_DIR: &str = "testdir";
+    const TEST_DIR2: &str = "testdir2";
+    const TEST_DIR_FILES_AND_DIRECTORIES: [&str; 17] = [
+        // TODO: Check if this order is the same on all platforms
+        "testdir/03_a",
+        "testdir/05_directory.csv",
+        "testdir/04_test.py",
+        "testdir/01_This.txt",
+        "testdir/02_is.o",
+        "testdir/more/",
+        "testdir/more/wèirder,name.txt",
+        "testdir/more/weird name.txt",
+        "testdir/more2/",
+        "testdir/more2/some more file",
+        "testdir/more2/some file",
+        "testdir/more/even-mörer/",
+        "testdir/more/even-mörer/all-solutions.bak",
+        "testdir/more/even-möre/",
+        "testdir/more/even-möre/wèirder,name.txt",
+        "testdir/more2/moredir/",
+        "testdir/more2/moredir/epic.file",
+    ];
     const TEST_DIR_FILES: [&str; 12] = [
         // TODO: Check if this order is the same on all platforms
         "testdir/03_a",
@@ -610,7 +723,7 @@ mod tests {
         // TODO: Check if this order is the same on all platforms
         "testdir/more/",
         "testdir/more2/",
-        "testdir/more/even-mörer",
+        "testdir/more/even-mörer/",
         "testdir/more/even-möre/",
         "testdir/more2/moredir/",
     ];
@@ -650,11 +763,31 @@ mod tests {
         );
     }
     #[test]
+    fn test_recurse_directories_and_files() {
+        let file_entry =
+            RecursiveReadDir::try_new(TEST_DIR, RecursiveReadDirKind::DirectoriesAndFiles).unwrap();
+        let files = file_entry
+            .into_iter()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(files.len(), TEST_DIR_FILES_AND_DIRECTORIES.len());
+        assert_eq!(
+            files,
+            TEST_DIR_FILES_AND_DIRECTORIES
+                .iter()
+                .map(std::path::Path::new)
+                .collect::<Vec<_>>()
+        );
+    }
+    #[test]
     fn test_recursive_readdir_fail() {
         let file_entry =
             RecursiveReadDir::try_new(WRONG_TEST_DIR, RecursiveReadDirKind::DirectoriesOnly);
         assert!(file_entry.is_err());
         let file_entry = RecursiveReadDir::try_new(WRONG_TEST_DIR, RecursiveReadDirKind::FilesOnly);
+        assert!(file_entry.is_err());
+        let file_entry =
+            RecursiveReadDir::try_new(WRONG_TEST_DIR, RecursiveReadDirKind::DirectoriesAndFiles);
         assert!(file_entry.is_err());
     }
 
@@ -681,5 +814,42 @@ mod tests {
             destination_path,
             std::path::Path::new("destination/root/some/dir/")
         );
+    }
+
+    #[test]
+    fn test_get_paths_in_destinatination_but_not_in_source_directories() {
+        let recurse_testdir =
+            RecursiveReadDir::try_new(TEST_DIR, RecursiveReadDirKind::DirectoriesOnly).unwrap();
+        let recurse_testdir2 =
+            RecursiveReadDir::try_new(TEST_DIR2, RecursiveReadDirKind::DirectoriesOnly).unwrap();
+        let res = get_paths_in_destinatination_but_not_in_source(recurse_testdir2, recurse_testdir)
+            .unwrap();
+
+        let difference = [
+            std::path::Path::new("testdir/more2"),
+            std::path::Path::new("testdir/more/even-mörer"),
+            std::path::Path::new("testdir/more2/moredir"),
+        ];
+        assert_eq!(res, difference);
+    }
+
+    #[test]
+    fn test_get_paths_in_destinatination_but_not_in_source_files() {
+        let recurse_testdir =
+            RecursiveReadDir::try_new(TEST_DIR, RecursiveReadDirKind::FilesOnly).unwrap();
+        let recurse_testdir2 =
+            RecursiveReadDir::try_new(TEST_DIR2, RecursiveReadDirKind::FilesOnly).unwrap();
+        let res = get_paths_in_destinatination_but_not_in_source(recurse_testdir2, recurse_testdir)
+            .unwrap();
+
+        let difference = [
+            std::path::Path::new("testdir/03_a"),
+            std::path::Path::new("testdir/more/weird name.txt"),
+            std::path::Path::new("testdir/more2/some more file"),
+            std::path::Path::new("testdir/more2/some file"),
+            std::path::Path::new("testdir/more/even-mörer/all-solutions.bak"),
+            std::path::Path::new("testdir/more2/moredir/epic.file"),
+        ];
+        assert_eq!(res, difference);
     }
 }
