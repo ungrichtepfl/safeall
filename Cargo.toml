@@ -6,6 +6,7 @@ edition = "2024"
 [dependencies]
 blake3 = { version = "1.8.2" }
 clap = { version = "4.5.53", features = ["derive"] }
+iced = "0.14.0"
 rayon = "1.11.0"
 
 [profile.release]

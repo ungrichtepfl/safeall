@@ -20,6 +20,8 @@ struct CliArgs {
 
 #[derive(clap::Subcommand)]
 enum Commands {
+    /// Run the gui
+    Gui,
     /// Backup files from source directory to destination directory.
     /// It does not delete files in the destination directory.
     Backup {
@@ -231,6 +233,7 @@ enum Error {
     CannotReadDirectoryContent(std::path::PathBuf, std::io::Error),
     CannotCreateRootDestinationDir(std::path::PathBuf, std::io::Error),
     RootDestinatinIsNotADirectory(std::path::PathBuf),
+    Gui(iced::Error),
 }
 
 impl std::error::Error for Error {}
@@ -268,6 +271,7 @@ impl std::fmt::Display for Error {
                 "Cannot iterate through directory\"{}\" => {error}",
                 path_buf.display()
             ),
+            Error::Gui(error) => write!(f, "Gui error => {error}"),
         }
     }
 }
@@ -653,6 +657,10 @@ fn backup<P: AsRef<std::path::Path>>(
 
 fn run(commands: Commands) -> Result<(), Error> {
     match commands {
+        Commands::Gui => iced::application(Gui::default, Gui::update, Gui::view)
+            .theme(Gui::theme)
+            .run()
+            .map_err(Error::Gui),
         Commands::Backup {
             source_root,
             destination_root,
@@ -773,9 +781,40 @@ fn cli() -> Result<(), Error> {
     run(cli_args.command)
 }
 
+#[derive(Clone)]
+enum Message {
+    Increment,
+    Decrement,
+}
+use iced::widget::{Column, button, column, text};
+
+#[derive(Default)]
+struct Gui {
+    value: i32,
+}
+
+impl Gui {
+    fn view(&self) -> Column<'_, Message> {
+        column![
+            button("+").on_press(Message::Increment),
+            text(self.value),
+            button("-").on_press(Message::Decrement),
+        ]
+    }
+    fn update(&mut self, message: Message) {
+        match message {
+            Message::Increment => self.value += 1,
+            Message::Decrement => self.value -= 1,
+        }
+    }
+    fn theme(&self) -> iced::Theme {
+        iced::Theme::Light
+    }
+}
+
 fn main() -> std::process::ExitCode {
     if let Err(e) = cli() {
-        eprintln!("{e}");
+        println!("{e}");
         return std::process::ExitCode::FAILURE;
     }
     std::process::ExitCode::SUCCESS
