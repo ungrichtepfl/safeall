@@ -76,13 +76,14 @@ impl From<Commands> for safeall::Command {
     }
 }
 
-fn cli() -> Result<(), safeall::Error> {
+async fn cli() -> Result<(), safeall::Error> {
     let cli_args = CliArgs::parse();
-    safeall::run(cli_args.command.into())
+    safeall::run(cli_args.command.into()).await
 }
 
-fn main() -> std::process::ExitCode {
-    if let Err(e) = cli() {
+#[tokio::main(flavor = "multi_thread")]
+async fn main() -> std::process::ExitCode {
+    if let Err(e) = cli().await {
         println!("{e}");
         return std::process::ExitCode::FAILURE;
     }
