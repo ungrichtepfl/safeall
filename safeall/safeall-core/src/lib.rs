@@ -117,7 +117,7 @@ impl std::fmt::Display for InvariantError {
             InvariantError::CannotStripPrefixOfPath(path_root, path, strip_prefix_error) => {
                 write!(
                     f,
-                    "Cannot strip prefix \"{}\" from \"{}\" => {strip_prefix_error}",
+                    "cannot strip prefix \"{}\" from \"{}\" => {strip_prefix_error}",
                     path_root.display(),
                     path.display()
                 )
@@ -147,38 +147,40 @@ impl std::fmt::Display for FileBackupError {
             FileBackupError::CannotCreateDestinationDir(path, error) => {
                 write!(
                     f,
-                    "Cannot create destination path \"{}\": {error}",
+                    "cannot create destination path \"{}\" because {error}",
                     path.display()
                 )
             }
             FileBackupError::CannotReadDirectoryContent(error) => {
-                write!(f, "Could not read source directory => {error}")
+                write!(f, "could not read source directory because {error}")
             }
             FileBackupError::CannotGetDirEntry(error) => {
-                write!(f, "Could not read entries of directory => {error}")
+                write!(f, "could not read entries of directory because {error}")
             }
             FileBackupError::DestinationForSourceDirExistsAsFile(destination_dir) => write!(
                 f,
-                "Could not create a new destination directory \"{}\" because destination already exists but not as a directory",
+                "could not create a new destination directory \"{}\" as the destination already exists but not as a directory",
                 destination_dir.display()
             ),
             FileBackupError::CannotCopyFile(destination_file, error) => write!(
                 f,
-                "Could not copy file to destination \"{}\" => {error}",
+                "could not copy file to destination \"{}\" because {error}",
                 destination_file.display()
             ),
             FileBackupError::CouldNotGenerateDestinationPath(strip_prefix_error) => write!(
                 f,
-                "Could not generate destination path => {strip_prefix_error}"
+                "could not generate destination path because {strip_prefix_error}"
             ),
             FileBackupError::InvariantBroken(error) => write!(
                 f,
-                "There is some problem with the program. Contact the maintainer {MAINTAINER_EMAIL} to fix the error => {error}"
+                "there is some problem with the program. Contact the maintainer {MAINTAINER_EMAIL} to fix the error. Error: {error}"
             ),
             FileBackupError::CannotDeleteDirectory(error) => {
-                write!(f, "Cannot delet directory => {error}")
+                write!(f, "cannot delet directory because {error}")
             }
-            FileBackupError::CannotDeleteFile(error) => write!(f, "Cannot delete file => {error}"),
+            FileBackupError::CannotDeleteFile(error) => {
+                write!(f, "cannot delete file because {error}")
+            }
         }
     }
 }
@@ -200,31 +202,27 @@ impl std::fmt::Display for Error {
             Error::FileBackupErrors(errors) => {
                 errors.iter().enumerate().try_for_each(|(i, (p, e))| {
                     let end = if i == errors.len() - 1 { "" } else { "\n" };
-                    write!(
-                        f,
-                        "Could not backup for path \"{}\" => {e}{end}",
-                        p.display()
-                    )
+                    write!(f, "could not backup \"{}\" because {e}{end}", p.display())
                 })
             }
             Error::SourceRootPathDoesNotExist(path_buf) => write!(
                 f,
-                "The specified source directory \"{}\" does not exists",
+                "the specified source directory \"{}\" does not exists",
                 path_buf.display()
             ),
             Error::CannotCreateRootDestinationDir(path_buf, error) => write!(
                 f,
-                "Cannot create a new destination directory \"{}\" => {error}",
+                "cannot create a new destination directory \"{}\" because {error}",
                 path_buf.display()
             ),
             Error::RootDestinatinIsNotADirectory(path_buf) => write!(
                 f,
-                "Specified destination \"{}\" is not a directory but a file",
+                "specified destination \"{}\" is not a directory but a file",
                 path_buf.display()
             ),
             Error::CannotReadDirectoryContent(path_buf, error) => write!(
                 f,
-                "Cannot iterate through directory\"{}\" => {error}",
+                "cannot iterate through directory\"{}\" because {error}",
                 path_buf.display()
             ),
         }

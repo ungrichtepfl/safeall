@@ -84,7 +84,7 @@ async fn cli() -> Result<(), safeall::Error> {
 #[tokio::main(flavor = "multi_thread")]
 async fn main() -> std::process::ExitCode {
     if let Err(e) = cli().await {
-        println!("{e}");
+        println!("ERROR: {e}");
         return std::process::ExitCode::FAILURE;
     }
     std::process::ExitCode::SUCCESS
