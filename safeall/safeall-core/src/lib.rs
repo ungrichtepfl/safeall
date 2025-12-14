@@ -511,58 +511,55 @@ async fn set_modified_time(
 }
 
 async fn get_paths_in_destinatination_but_not_in_source(
-    mut recurse_source: RecursiveReadDir,
-    mut recurse_destination: RecursiveReadDir,
+    recurse_source: RecursiveReadDir,
+    recurse_destination: RecursiveReadDir,
 ) -> Result<Vec<std::path::PathBuf>, (std::path::PathBuf, FileBackupError)> {
-    // TODO: Make async
     let mut res = vec![];
     let source_root = recurse_source.root_directory().to_owned();
-    'get_new_source: for source in recurse_source.by_ref() {
+    let destination_root = recurse_destination.root_directory().to_owned();
+    let mut recurse_source = futures::stream::iter(recurse_source);
+    let mut recurse_destination = futures::stream::iter(recurse_destination);
+    use futures::stream::StreamExt;
+    'get_new_source: while let Some(source) = recurse_source.next().await {
         let source = source?;
         let source_stripped = source.strip_prefix(&source_root).map_err(|e| {
             (
-                source.to_owned(),
+                source.clone(),
                 FileBackupError::InvariantBroken(InvariantError::CannotStripPrefixOfPath(
-                    source_root.to_owned(),
-                    source.to_owned(),
+                    source_root.clone(),
+                    source.clone(),
                     e,
                 )),
             )
         })?;
-        'get_new_destination: loop {
-            if let Some(destination) = recurse_destination.next() {
-                let destination = destination?;
-                let destination_stripped = destination
-                    .strip_prefix(recurse_destination.root_directory())
-                    .map_err(|e| {
-                        (
-                            destination.to_owned(),
-                            FileBackupError::InvariantBroken(
-                                InvariantError::CannotStripPrefixOfPath(
-                                    recurse_destination.root_directory().to_owned(),
-                                    destination.to_owned(),
-                                    e,
-                                ),
-                            ),
-                        )
-                    })?;
-                if source_stripped != destination_stripped {
-                    res.push(destination);
-                    continue 'get_new_destination;
-                } else {
-                    continue 'get_new_source;
-                }
+        'get_new_destination: while let Some(destination) = recurse_destination.next().await {
+            let destination = destination?;
+            let destination_stripped =
+                destination.strip_prefix(&destination_root).map_err(|e| {
+                    (
+                        destination.clone(),
+                        FileBackupError::InvariantBroken(InvariantError::CannotStripPrefixOfPath(
+                            destination_root.clone(),
+                            destination.clone(),
+                            e,
+                        )),
+                    )
+                })?;
+            if source_stripped != destination_stripped {
+                res.push(destination);
+                continue 'get_new_destination;
             } else {
-                // No destination files left, break out
-                break 'get_new_source;
+                continue 'get_new_source;
             }
         }
+        // No destination files left, break out
+        break 'get_new_source;
     }
 
-    for destination in recurse_destination {
+    while let Some(destination) = recurse_destination.next().await {
         // If there are some destination files left they are all not in source:
         debug_assert!(
-            recurse_source.next().is_none(),
+            recurse_source.next().await.is_none(),
             "recurse_source must be empty."
         );
         let destination = destination?;
