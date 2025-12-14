@@ -1,61 +1,11 @@
-const MAINTAINER_EMAIL: &str = "christoph.ungricht@outlook.com";
+pub const MAINTAINER_EMAIL: &str = "christoph.ungricht@outlook.com";
 
-use clap::Parser;
-
-const STYLES: clap::builder::styling::Styles = clap::builder::styling::Styles::styled()
-    .header(clap::builder::styling::AnsiColor::Green.on_default().bold())
-    .usage(clap::builder::styling::AnsiColor::Green.on_default().bold())
-    .literal(clap::builder::styling::AnsiColor::Blue.on_default().bold())
-    .placeholder(clap::builder::styling::AnsiColor::Cyan.on_default());
-
-/// Backup or sync your filesystem to/from another folder.
-#[derive(clap::Parser)]
-#[command(version, about, long_about = None)]
-#[command(propagate_version = true)]
-#[command(styles=STYLES)]
-struct CliArgs {
-    #[command(subcommand)]
-    command: Commands,
-}
-
-#[derive(clap::Subcommand)]
-enum Commands {
-    /// Run the gui
-    Gui,
-    /// Backup files from source directory to destination directory.
-    /// It does not delete files in the destination directory.
-    Backup {
-        /// Folder which you want to backup
-        source_root: String,
-        /// Folder which will be your backup
-        destination_root: String,
-    },
-    /// Sync destination directory from source directory.
-    /// This delets files in the destination directory when they do not exist in the source directory.
-    Sync {
-        /// Folder which you want to backup
-        source_root: String,
-        /// Folder which will be your backup
-        destination_root: String,
-    },
-    /// Restore the source directory from the destination directory.
-    Restore {
-        /// Folder which you want to restore from the backup
-        source_root: String,
-        /// Folder where you have your backup
-        destination_root: String,
-        /// If you want to delete the files that are not in your backup
-        #[arg(short, long)]
-        delete_files: bool,
-    },
-}
-
-enum ReadDirType {
+pub enum ReadDirType {
     DirectoriesOnly,
     FilesOnly,
 }
 
-struct RecursiveReadDir {
+pub struct RecursiveReadDir {
     for_root: std::path::PathBuf,
     readdir_type: ReadDirType,
     next_readdirs: std::collections::VecDeque<std::path::PathBuf>,
@@ -64,11 +14,11 @@ struct RecursiveReadDir {
 }
 
 impl RecursiveReadDir {
-    fn root_directory(&self) -> &std::path::Path {
+    pub fn root_directory(&self) -> &std::path::Path {
         self.for_root.as_ref()
     }
 
-    fn try_new<P: AsRef<std::path::Path>>(
+    pub fn try_new<P: AsRef<std::path::Path>>(
         directory: P,
         readdir_type: ReadDirType,
     ) -> Result<Self, std::io::Error> {
@@ -144,7 +94,7 @@ impl Iterator for RecursiveReadDir {
 }
 
 #[derive(Debug)]
-enum InvariantError {
+pub enum InvariantError {
     CannotStripPrefixOfPath(
         std::path::PathBuf,
         std::path::PathBuf,
@@ -170,7 +120,7 @@ impl std::fmt::Display for InvariantError {
 }
 
 #[derive(Debug)]
-enum FileBackupError {
+pub enum FileBackupError {
     CannotCreateDestinationDir(std::path::PathBuf, std::io::Error),
     CannotReadDirectoryContent(std::io::Error),
     CannotGetDirEntry(std::io::Error),
@@ -227,13 +177,12 @@ impl std::fmt::Display for FileBackupError {
 }
 
 #[derive(Debug)]
-enum Error {
+pub enum Error {
     FileBackupErrors(Vec<(std::path::PathBuf, FileBackupError)>),
     SourceRootPathDoesNotExist(std::path::PathBuf),
     CannotReadDirectoryContent(std::path::PathBuf, std::io::Error),
     CannotCreateRootDestinationDir(std::path::PathBuf, std::io::Error),
     RootDestinatinIsNotADirectory(std::path::PathBuf),
-    Gui(iced::Error),
 }
 
 impl std::error::Error for Error {}
@@ -271,7 +220,6 @@ impl std::fmt::Display for Error {
                 "Cannot iterate through directory\"{}\" => {error}",
                 path_buf.display()
             ),
-            Error::Gui(error) => write!(f, "Gui error => {error}"),
         }
     }
 }
@@ -655,20 +603,32 @@ fn backup<P: AsRef<std::path::Path>>(
     }
 }
 
-fn run(commands: Commands) -> Result<(), Error> {
+pub enum Command {
+    Backup {
+        source_root: std::path::PathBuf,
+        destination_root: std::path::PathBuf,
+    },
+    Sync {
+        source_root: std::path::PathBuf,
+        destination_root: std::path::PathBuf,
+    },
+    Restore {
+        source_root: std::path::PathBuf,
+        destination_root: std::path::PathBuf,
+        delete_files: bool,
+    },
+}
+
+pub fn run(commands: Command) -> Result<(), Error> {
     match commands {
-        Commands::Gui => iced::application(Gui::default, Gui::update, Gui::view)
-            .theme(Gui::theme)
-            .run()
-            .map_err(Error::Gui),
-        Commands::Backup {
+        Command::Backup {
             source_root,
             destination_root,
         } => {
             validate_root_paths(&source_root, &destination_root)?;
             backup(&source_root, &destination_root)
         }
-        Commands::Sync {
+        Command::Sync {
             source_root,
             destination_root,
         } => {
@@ -677,7 +637,7 @@ fn run(commands: Commands) -> Result<(), Error> {
             purge_files_and_dirs_in_destination(&source_root, &destination_root)?;
             Ok(())
         }
-        Commands::Restore {
+        Command::Restore {
             source_root,
             destination_root,
             delete_files,
@@ -774,50 +734,6 @@ fn purge_files_and_dirs_in_destination<P: AsRef<std::path::Path>>(
     } else {
         Ok(())
     }
-}
-
-fn cli() -> Result<(), Error> {
-    let cli_args = CliArgs::parse();
-    run(cli_args.command)
-}
-
-#[derive(Clone)]
-enum Message {
-    Increment,
-    Decrement,
-}
-use iced::widget::{Column, button, column, text};
-
-#[derive(Default)]
-struct Gui {
-    value: i32,
-}
-
-impl Gui {
-    fn view(&self) -> Column<'_, Message> {
-        column![
-            button("+").on_press(Message::Increment),
-            text(self.value),
-            button("-").on_press(Message::Decrement),
-        ]
-    }
-    fn update(&mut self, message: Message) {
-        match message {
-            Message::Increment => self.value += 1,
-            Message::Decrement => self.value -= 1,
-        }
-    }
-    fn theme(&self) -> iced::Theme {
-        iced::Theme::Light
-    }
-}
-
-fn main() -> std::process::ExitCode {
-    if let Err(e) = cli() {
-        println!("{e}");
-        return std::process::ExitCode::FAILURE;
-    }
-    std::process::ExitCode::SUCCESS
 }
 
 #[cfg(test)]

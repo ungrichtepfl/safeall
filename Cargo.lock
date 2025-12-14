@@ -2517,13 +2517,27 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b39cdef0fa800fc44525c84ccb54a029961a8215f9619753635a9c0d2538d46d"
 
 [[package]]
-name = "safeall"
+name = "safeall-cli"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "safeall-core",
+]
+
+[[package]]
+name = "safeall-core"
 version = "0.1.0"
 dependencies = [
  "blake3",
- "clap",
- "iced",
  "rayon",
+]
+
+[[package]]
+name = "safeall-gui"
+version = "0.1.0"
+dependencies = [
+ "iced",
+ "safeall-core",
 ]
 
 [[package]]

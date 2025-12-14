@@ -1,13 +1,10 @@
-[package]
-name = "safeall"
-version = "0.1.0"
-edition = "2024"
+[workspace]
+members = [
+    "safeall/safeall-core",
+    "safeall/safeall-cli",
+    "safeall/safeall-gui",
+]
+resolver = "3"
 
-[dependencies]
-blake3 = { version = "1.8.2" }
-clap = { version = "4.5.53", features = ["derive"] }
-iced = "0.14.0"
-rayon = "1.11.0"
-
-[profile.release]
-debug = true
+[workspace.dependencies]
+safeall-core = { path = "safeall/safeall-core" }
