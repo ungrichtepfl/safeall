@@ -12,3 +12,4 @@ safeall-core.workspace = true
 
 clap = { version = "4.5.53", features = ["derive"] }
 tokio.workspace = true
+indicatif = { version = "0.18.3", features = ["tokio"] }

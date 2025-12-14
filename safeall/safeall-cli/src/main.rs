@@ -76,9 +76,71 @@ impl From<Commands> for safeall::Command {
     }
 }
 
-async fn cli() -> Result<(), safeall::Error> {
+#[derive(Debug)]
+enum Error {
+    Core(safeall::Error),
+    Tokio(tokio::task::JoinError),
+}
+
+impl std::error::Error for Error {}
+
+impl From<tokio::task::JoinError> for Error {
+    fn from(value: tokio::task::JoinError) -> Self {
+        Self::Tokio(value)
+    }
+}
+impl From<safeall::Error> for Error {
+    fn from(value: safeall::Error) -> Self {
+        Self::Core(value)
+    }
+}
+
+impl std::fmt::Display for Error {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Core(e) => e.fmt(f),
+            Self::Tokio(e) => e.fmt(f),
+        }
+    }
+}
+
+async fn cli() -> Result<(), Error> {
     let cli_args = CliArgs::parse();
-    safeall::run(cli_args.command.into()).await
+    let (message_sender, mut message_receiver) = tokio::sync::mpsc::unbounded_channel();
+    let run =
+        tokio::spawn(async move { safeall::run(cli_args.command.into(), message_sender).await });
+
+    let bar = indicatif::ProgressBar::no_length();
+    let style = indicatif::ProgressStyle::default_bar()
+        .template("{wide_msg}\n{pos:>7}/{len:7} {bar:40.cyan/blue}")
+        .unwrap();
+    bar.set_style(style);
+    let mut total = 0;
+    let mut done = 0;
+    while let Some(message) = message_receiver.recv().await {
+        use safeall::Message as M;
+        match message {
+            M::Warning(warning) => println!("WARNING: {warning}"),
+            M::Info(info) => bar.set_message(info),
+            M::Progress {
+                progress: _,
+                done: d,
+                total: t,
+            } => {
+                bar.set_length(t as u64);
+                total = t;
+                bar.set_position(d as u64);
+                done = d;
+            }
+        }
+    }
+    bar.finish_and_clear();
+    println!("Done!");
+    println!("{done}/{total} files have been backed up.");
+
+    let res = run.await?;
+    res?;
+    Ok(())
 }
 
 #[tokio::main(flavor = "multi_thread")]
