@@ -7,11 +7,13 @@ fn cpu_count() -> usize {
         .unwrap_or(1)
 }
 
+#[derive(Debug)]
 pub enum ReadDirType {
     DirectoriesOnly,
     FilesOnly,
 }
 
+#[derive(Debug)]
 pub struct RecursiveReadDir {
     for_root: std::path::PathBuf,
     readdir_type: ReadDirType,
@@ -557,57 +559,53 @@ async fn get_paths_in_destinatination_but_not_in_source(
     recurse_source: RecursiveReadDir,
     recurse_destination: RecursiveReadDir,
 ) -> Result<Vec<std::path::PathBuf>, (std::path::PathBuf, FileBackupError)> {
-    let mut res = vec![];
-    let source_root = recurse_source.root_directory().to_owned();
-    let destination_root = recurse_destination.root_directory().to_owned();
-    let mut recurse_source = futures::stream::iter(recurse_source);
-    let mut recurse_destination = futures::stream::iter(recurse_destination);
-    use futures::stream::StreamExt;
-    'get_new_source: while let Some(source) = recurse_source.next().await {
-        let source = source?;
-        let source_stripped = source.strip_prefix(&source_root).map_err(|e| {
-            (
-                source.clone(),
-                FileBackupError::InvariantBroken(InvariantError::CannotStripPrefixOfPath(
-                    source_root.clone(),
-                    source.clone(),
-                    e,
-                )),
-            )
-        })?;
-        'get_new_destination: while let Some(destination) = recurse_destination.next().await {
-            let destination = destination?;
-            let destination_stripped =
-                destination.strip_prefix(&destination_root).map_err(|e| {
+    let source_root_path = recurse_source.root_directory().to_owned();
+    let source_root_path = &source_root_path;
+    let destination_root_path = recurse_destination.root_directory().to_owned();
+    let destination_root_path = &destination_root_path;
+    use futures::stream::TryStreamExt;
+    let source_files: std::collections::HashSet<_> = futures::stream::iter(recurse_source)
+        .and_then(async |path| {
+            path.strip_prefix(source_root_path)
+                .map(|p| p.to_owned())
+                .map_err(|e| {
                     (
-                        destination.clone(),
+                        path.clone(),
                         FileBackupError::InvariantBroken(InvariantError::CannotStripPrefixOfPath(
-                            destination_root.clone(),
-                            destination.clone(),
+                            source_root_path.to_owned(),
+                            path.clone(),
                             e,
                         )),
                     )
-                })?;
-            if source_stripped != destination_stripped {
-                res.push(destination);
-                continue 'get_new_destination;
-            } else {
-                continue 'get_new_source;
-            }
-        }
-        // No destination files left, break out
-        break 'get_new_source;
-    }
-
-    while let Some(destination) = recurse_destination.next().await {
-        // If there are some destination files left they are all not in source:
-        debug_assert!(
-            recurse_source.next().await.is_none(),
-            "recurse_source must be empty."
-        );
-        let destination = destination?;
-        res.push(destination);
-    }
+                })
+        })
+        .try_collect()
+        .await?;
+    let destination_files: std::collections::HashSet<_> =
+        futures::stream::iter(recurse_destination)
+            .and_then(async |path| {
+                path.strip_prefix(destination_root_path)
+                    .map(|p| p.to_owned())
+                    .map_err(|e| {
+                        (
+                            path.to_owned(),
+                            FileBackupError::InvariantBroken(
+                                InvariantError::CannotStripPrefixOfPath(
+                                    destination_root_path.clone(),
+                                    path.clone(),
+                                    e,
+                                ),
+                            ),
+                        )
+                    })
+            })
+            .try_collect()
+            .await?;
+    let mut res: Vec<_> = (&destination_files - &source_files)
+        .iter()
+        .map(|p| [destination_root_path, p].iter().collect())
+        .collect();
+    res.sort(); // Such that foo/bar/baz is after foo/bar
     Ok(res)
 }
 fn validate_root_paths<P: AsRef<std::path::Path>>(
@@ -821,7 +819,9 @@ mod tests {
 
     const WRONG_TEST_DIR: &str = "-------";
     const TEST_DIR: &str = "testdir";
-    const TEST_DIR2: &str = "testdir2";
+    const TEST_DIR_LESS: &str = "testdir_less";
+    const TEST_DIR_LESS_AND_ADDITIONAL: &str = "testdir_less_and_additional";
+    const TEST_DIR_ADDITIONAL: &str = "testdir_additional";
     const TEST_DIR_FILES: [&str; 12] = [
         // TODO: Check if this order is the same on all platforms
         "testdir/03_a",
@@ -853,7 +853,7 @@ mod tests {
             .into_iter()
             .collect::<Result<Vec<_>, _>>()
             .unwrap();
-        assert_eq!(files.len(), TEST_DIR_FILES.len());
+        assert_eq!(dbg!(&files).len(), dbg!(&TEST_DIR_FILES).len());
         assert_eq!(
             files,
             TEST_DIR_FILES
@@ -869,7 +869,7 @@ mod tests {
             .into_iter()
             .collect::<Result<Vec<_>, _>>()
             .unwrap();
-        assert_eq!(files.len(), TEST_DIR_DIRECTORIES.len());
+        assert_eq!(dbg!(&files).len(), dbg!(&TEST_DIR_DIRECTORIES).len());
         assert_eq!(
             files,
             TEST_DIR_DIRECTORIES
@@ -881,9 +881,9 @@ mod tests {
     #[test]
     fn test_recursive_readdir_fail() {
         let file_entry = RecursiveReadDir::try_new(WRONG_TEST_DIR, ReadDirType::DirectoriesOnly);
-        assert!(file_entry.is_err());
+        assert!(dbg!(file_entry).is_err());
         let file_entry = RecursiveReadDir::try_new(WRONG_TEST_DIR, ReadDirType::FilesOnly);
-        assert!(file_entry.is_err());
+        assert!(dbg!(file_entry).is_err());
     }
 
     #[test]
@@ -912,33 +912,36 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_get_paths_in_destinatination_but_not_in_source_directories() {
+    async fn test_get_paths_in_destinatination_but_not_in_source_directories_less_and_additional() {
         let recurse_testdir =
             RecursiveReadDir::try_new(TEST_DIR, ReadDirType::DirectoriesOnly).unwrap();
         let recurse_testdir2 =
-            RecursiveReadDir::try_new(TEST_DIR2, ReadDirType::DirectoriesOnly).unwrap();
+            RecursiveReadDir::try_new(TEST_DIR_LESS_AND_ADDITIONAL, ReadDirType::DirectoriesOnly)
+                .unwrap();
         let res = get_paths_in_destinatination_but_not_in_source(recurse_testdir2, recurse_testdir)
             .await
             .unwrap();
 
-        let difference = [
+        let mut difference = [
             std::path::Path::new("testdir/more2"),
             std::path::Path::new("testdir/more/even-mörer"),
             std::path::Path::new("testdir/more2/moredir"),
         ];
+        difference.sort();
         assert_eq!(res, difference);
     }
 
     #[tokio::test]
-    async fn test_get_paths_in_destinatination_but_not_in_source_files() {
+    async fn test_get_paths_in_destinatination_but_not_in_source_files_less_and_additional() {
         let recurse_testdir = RecursiveReadDir::try_new(TEST_DIR, ReadDirType::FilesOnly).unwrap();
         let recurse_testdir2 =
-            RecursiveReadDir::try_new(TEST_DIR2, ReadDirType::FilesOnly).unwrap();
+            RecursiveReadDir::try_new(TEST_DIR_LESS_AND_ADDITIONAL, ReadDirType::FilesOnly)
+                .unwrap();
         let res = get_paths_in_destinatination_but_not_in_source(recurse_testdir2, recurse_testdir)
             .await
             .unwrap();
 
-        let difference = [
+        let mut difference = [
             std::path::Path::new("testdir/03_a"),
             std::path::Path::new("testdir/more/weird name.txt"),
             std::path::Path::new("testdir/more2/some more file"),
@@ -946,6 +949,71 @@ mod tests {
             std::path::Path::new("testdir/more/even-mörer/all-solutions.bak"),
             std::path::Path::new("testdir/more2/moredir/epic.file"),
         ];
+        difference.sort();
         assert_eq!(res, difference);
+    }
+    #[tokio::test]
+    async fn test_get_paths_in_destinatination_but_not_in_source_directories_less() {
+        let recurse_testdir =
+            RecursiveReadDir::try_new(TEST_DIR, ReadDirType::DirectoriesOnly).unwrap();
+        let recurse_testdir2 =
+            RecursiveReadDir::try_new(TEST_DIR_LESS, ReadDirType::DirectoriesOnly).unwrap();
+        let res = get_paths_in_destinatination_but_not_in_source(recurse_testdir2, recurse_testdir)
+            .await
+            .unwrap();
+
+        let mut difference = [
+            std::path::Path::new("testdir/more2"),
+            std::path::Path::new("testdir/more/even-mörer"),
+            std::path::Path::new("testdir/more2/moredir"),
+        ];
+        difference.sort();
+        assert_eq!(res, difference);
+    }
+
+    #[tokio::test]
+    async fn test_get_paths_in_destinatination_but_not_in_source_files_less() {
+        let recurse_testdir = RecursiveReadDir::try_new(TEST_DIR, ReadDirType::FilesOnly).unwrap();
+        let recurse_testdir2 =
+            RecursiveReadDir::try_new(TEST_DIR_LESS, ReadDirType::FilesOnly).unwrap();
+        let res = get_paths_in_destinatination_but_not_in_source(recurse_testdir2, recurse_testdir)
+            .await
+            .unwrap();
+
+        let mut difference = [
+            std::path::Path::new("testdir/03_a"),
+            std::path::Path::new("testdir/more/weird name.txt"),
+            std::path::Path::new("testdir/more2/some more file"),
+            std::path::Path::new("testdir/more2/some file"),
+            std::path::Path::new("testdir/more/even-mörer/all-solutions.bak"),
+            std::path::Path::new("testdir/more2/moredir/epic.file"),
+        ];
+        difference.sort();
+        assert_eq!(res, difference);
+    }
+
+    #[tokio::test]
+    async fn test_get_paths_in_destinatination_but_not_in_source_directories_additional() {
+        let recurse_testdir =
+            RecursiveReadDir::try_new(TEST_DIR, ReadDirType::DirectoriesOnly).unwrap();
+        let recurse_testdir2 =
+            RecursiveReadDir::try_new(TEST_DIR_ADDITIONAL, ReadDirType::DirectoriesOnly).unwrap();
+        let res = get_paths_in_destinatination_but_not_in_source(recurse_testdir2, recurse_testdir)
+            .await
+            .unwrap();
+
+        assert!(dbg!(res).is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_get_paths_in_destinatination_but_not_in_source_files_additional() {
+        let recurse_testdir = RecursiveReadDir::try_new(TEST_DIR, ReadDirType::FilesOnly).unwrap();
+        let recurse_testdir2 =
+            RecursiveReadDir::try_new(TEST_DIR_ADDITIONAL, ReadDirType::FilesOnly).unwrap();
+        let res = get_paths_in_destinatination_but_not_in_source(recurse_testdir2, recurse_testdir)
+            .await
+            .unwrap();
+
+        assert!(dbg!(res).is_empty());
     }
 }
