@@ -251,10 +251,9 @@ async fn backup_all_files(
     let source_recurse_files =
         RecursiveReadDir::try_new(source_directory_root, ReadDirType::FilesOnly)
             .map_err(|e| Error::CannotReadDirectoryContent(source_directory_root.to_owned(), e))?;
-    let done = std::sync::atomic::AtomicUsize::new(0);
-    let done = &done;
+    let done = std::sync::atomic::AtomicUsize::new(1);
     let errors: Vec<_> = futures::stream::iter(source_recurse_files)
-        .map(|source_file| async move {
+        .map(async |source_file| {
             let source_file = source_file?;
             if not_existing_destination_directories
                 .iter()
@@ -415,6 +414,7 @@ async fn get_hash(path: &std::path::Path) -> Option<blake3::Hash> {
 pub enum Progress {
     Copy,
     Delete,
+    DeleteDirs,
 }
 
 pub enum Message {
@@ -461,11 +461,13 @@ async fn skip_copy(
             return false;
         }
     } else {
-        eprintln!(
-            "WARNING: Cannot get hash of either {} or {}. We just try to copy the file anyway.",
-            source_file.display(),
-            destination_file.display()
-        );
+        message_sender
+            .send(Message::Warning(format!(
+                "WARNING: Cannot get hash of either {} or {}. We just try to copy the file anyway.",
+                source_file.display(),
+                destination_file.display()
+            )))
+            .ok();
     }
 
     true
@@ -706,7 +708,8 @@ pub async fn run(
         } => {
             validate_root_paths(&source_root, &destination_root)?;
             backup(&source_root, &destination_root, &message_sender).await?;
-            purge_files_and_dirs_in_destination(&source_root, &destination_root).await?;
+            purge_files_and_dirs_in_destination(&source_root, &destination_root, &message_sender)
+                .await?;
             Ok(())
         }
         Command::Restore {
@@ -718,7 +721,12 @@ pub async fn run(
             // NOTE: Same as sync but switch arguments
             backup(&destination_root, &source_root, &message_sender).await?;
             if delete_files {
-                purge_files_and_dirs_in_destination(&destination_root, &source_root).await?;
+                purge_files_and_dirs_in_destination(
+                    &destination_root,
+                    &source_root,
+                    &message_sender,
+                )
+                .await?;
             }
             Ok(())
         }
@@ -744,6 +752,7 @@ fn get_destination_file_path(
 async fn purge_files_and_dirs_in_destination<P: AsRef<std::path::Path>>(
     source_root: P,
     destination_root: P,
+    message_sender: &tokio::sync::mpsc::UnboundedSender<Message>,
 ) -> Result<(), Error> {
     use futures::stream::StreamExt;
 
@@ -765,7 +774,9 @@ async fn purge_files_and_dirs_in_destination<P: AsRef<std::path::Path>>(
 
     let mut errors = vec![];
     let mut deleted_dirs = vec![];
+    let num_dirs = futures::stream::iter(dirs_to_delete.clone()).count().await;
     let mut dir_stream = futures::stream::iter(dirs_to_delete);
+    let mut done = 0;
     while let Some(dir) = dir_stream.next().await {
         if deleted_dirs.iter().any(|d| dir.starts_with(d)) {
             continue;
@@ -773,7 +784,14 @@ async fn purge_files_and_dirs_in_destination<P: AsRef<std::path::Path>>(
         if let Err(e) = tokio::fs::remove_dir_all(&dir).await {
             errors.push((dir, FileBackupError::CannotDeleteDirectory(e)));
         } else {
-            println!("Deleted \"{}\"", dir.display());
+            done += 1;
+            message_sender
+                .send(Message::Progress {
+                    progress: Progress::DeleteDirs,
+                    done,
+                    total: num_dirs,
+                })
+                .ok();
             deleted_dirs.push(dir);
         }
     }
@@ -790,14 +808,19 @@ async fn purge_files_and_dirs_in_destination<P: AsRef<std::path::Path>>(
     )
     .await
     .map_err(|e| Error::FileBackupErrors(vec![e]))?;
-
+    let done = std::sync::atomic::AtomicUsize::new(1);
+    let num_files = futures::stream::iter(files_to_delete.clone()).count().await;
     let mut errors_file: Vec<_> = futures::stream::iter(files_to_delete)
-        .map(|file| async move {
+        .map(async |file| {
             tokio::fs::remove_file(&file)
                 .await
                 .map_err(|e| (file.to_owned(), FileBackupError::CannotDeleteFile(e)))
                 .map(|_| {
-                    println!("Deleted \"{}\"", file.display());
+                    message_sender.send(Message::Progress {
+                        progress: Progress::DeleteDirs,
+                        done: done.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+                        total: num_files,
+                    })
                 })
         })
         .buffer_unordered(cpu_count())
