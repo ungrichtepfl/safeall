@@ -22,6 +22,10 @@ pub struct RecursiveReadDir {
     current_dirpath: std::path::PathBuf,
 }
 
+pub trait MessageSender {
+    fn send(&self, message: Message);
+}
+
 impl RecursiveReadDir {
     pub fn root_directory(&self) -> &std::path::Path {
         self.for_root.as_ref()
@@ -238,7 +242,7 @@ async fn backup_all_files(
     source_directory_root: &std::path::Path,
     destination_directory_root: &std::path::Path,
     not_existing_destination_directories: &[&std::path::Path],
-    message_sender: &tokio::sync::mpsc::UnboundedSender<Message>,
+    message_sender: &impl MessageSender,
 ) -> Result<Vec<(std::path::PathBuf, FileBackupError)>, Error> {
     debug_assert!(source_directory_root.is_dir(), "Source is not a dir");
     debug_assert!(
@@ -276,18 +280,14 @@ async fn backup_all_files(
             .await
             .inspect_err(|e| {
                 // NOTE: Early feedback
-                message_sender
-                    .send(Message::Error(Error::FileBackupErrors(vec![e.clone()])))
-                    .ok();
+                message_sender.send(Message::Error(Error::FileBackupErrors(vec![e.clone()])));
             })
             .inspect(|_| {
-                message_sender
-                    .send(Message::Progress {
-                        progress: Progress::CopyFiles,
-                        done: done.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
-                        total: num_files,
-                    })
-                    .ok();
+                message_sender.send(Message::Progress {
+                    progress: Progress::CopyFiles,
+                    done: done.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+                    total: num_files,
+                });
             })
         })
         .buffer_unordered(cpu_count())
@@ -301,7 +301,7 @@ async fn backup_single_file(
     source_directory_root: &std::path::Path,
     destination_directory_root: &std::path::Path,
     source_file: std::path::PathBuf,
-    message_sender: &tokio::sync::mpsc::UnboundedSender<Message>,
+    message_sender: &impl MessageSender,
 ) -> Result<(), (std::path::PathBuf, FileBackupError)> {
     debug_assert!(!source_file.is_dir(), "Must be a file or a symbolic link");
 
@@ -317,7 +317,7 @@ async fn backup_single_file(
 async fn create_all_directories_in_destination(
     source_directory_root: &std::path::Path,
     destination_directory_root: &std::path::Path,
-    message_sender: &tokio::sync::mpsc::UnboundedSender<Message>,
+    message_sender: &impl MessageSender,
 ) -> Result<Vec<(std::path::PathBuf, FileBackupError)>, Error> {
     debug_assert!(source_directory_root.is_dir(), "Source is not a dir");
     debug_assert!(
@@ -351,18 +351,14 @@ async fn create_all_directories_in_destination(
                 .await
                 .inspect_err(|e| {
                     // NOTE: Early feedback
-                    message_sender
-                        .send(Message::Error(Error::FileBackupErrors(vec![e.clone()])))
-                        .ok();
+                    message_sender.send(Message::Error(Error::FileBackupErrors(vec![e.clone()])));
                 })
                 .inspect(|_| {
-                    message_sender
-                        .send(Message::Progress {
-                            progress: Progress::CreateDir,
-                            done: i,
-                            total: num_dirs,
-                        })
-                        .ok();
+                    message_sender.send(Message::Progress {
+                        progress: Progress::CreateDir,
+                        done: i,
+                        total: num_dirs,
+                    });
                 }) {
                     errors.push(err);
                 }
@@ -377,7 +373,7 @@ async fn create_single_directory_if_not_exists(
     source_directory_root: &std::path::Path,
     destination_directory_root: &std::path::Path,
     source_directory: std::path::PathBuf,
-    message_sender: &tokio::sync::mpsc::UnboundedSender<Message>,
+    message_sender: &impl MessageSender,
 ) -> Result<(), (std::path::PathBuf, FileBackupError)> {
     debug_assert!(source_directory.is_dir(), "Must be a directory");
     let new_destination_dir = get_destination_file_path(
@@ -389,12 +385,10 @@ async fn create_single_directory_if_not_exists(
     if new_destination_dir.exists() {
         // If it already exists it must be a directory too
         if new_destination_dir.is_dir() {
-            message_sender
-                .send(Message::Info(Info::DestinationDirAlreadyExists {
-                    source: source_directory.clone(),
-                    destination: new_destination_dir.clone(),
-                }))
-                .ok();
+            message_sender.send(Message::Info(Info::DestinationDirAlreadyExists {
+                source: source_directory.clone(),
+                destination: new_destination_dir.clone(),
+            }));
             Ok(())
         } else {
             Err((
@@ -403,12 +397,10 @@ async fn create_single_directory_if_not_exists(
             ))
         }
     } else {
-        message_sender
-            .send(Message::Info(Info::DirCreated {
-                source: source_directory.clone(),
-                destination: new_destination_dir.clone(),
-            }))
-            .ok();
+        message_sender.send(Message::Info(Info::DirCreated {
+            source: source_directory.clone(),
+            destination: new_destination_dir.clone(),
+        }));
         tokio::fs::create_dir(&new_destination_dir)
             .await
             .map_err(|e| {
@@ -421,12 +413,10 @@ async fn create_single_directory_if_not_exists(
                 )
             })
             .inspect(|_| {
-                message_sender
-                    .send(Message::Info(Info::DirCreated {
-                        source: source_directory,
-                        destination: new_destination_dir,
-                    }))
-                    .ok();
+                message_sender.send(Message::Info(Info::DirCreated {
+                    source: source_directory,
+                    destination: new_destination_dir,
+                }));
             })
     }
 }
@@ -538,7 +528,7 @@ async fn skip_copy(
     source_file: &std::path::Path,
     destination_file: &std::path::Path,
     source_metadata: &Option<FileMetaData>,
-    message_sender: &tokio::sync::mpsc::UnboundedSender<Message>,
+    message_sender: &impl MessageSender,
 ) -> bool {
     if !destination_file.exists() {
         return false;
@@ -547,13 +537,11 @@ async fn skip_copy(
     if destination_metadata.is_none() && source_metadata.is_some()
         || destination_metadata.is_some() && source_metadata.is_none()
     {
-        message_sender
-            .send(Message::Warning(Warning::CannotGetMetadata {
-                source: source_file.to_owned(),
-                destination: destination_file.to_owned(),
-                copy_anyway: true,
-            }))
-            .ok();
+        message_sender.send(Message::Warning(Warning::CannotGetMetadata {
+            source: source_file.to_owned(),
+            destination: destination_file.to_owned(),
+            copy_anyway: true,
+        }));
         return false;
     }
 
@@ -569,13 +557,11 @@ async fn skip_copy(
             return false;
         }
     } else {
-        message_sender
-            .send(Message::Warning(Warning::CannotGetHash {
-                source: source_file.to_owned(),
-                destination: destination_file.to_owned(),
-                copy_anyway: true,
-            }))
-            .ok();
+        message_sender.send(Message::Warning(Warning::CannotGetHash {
+            source: source_file.to_owned(),
+            destination: destination_file.to_owned(),
+            copy_anyway: true,
+        }));
     }
 
     true
@@ -584,7 +570,7 @@ async fn skip_copy(
 async fn copy_or_skip_if_same(
     source_file: &std::path::Path,
     destination_file: &std::path::Path,
-    message_sender: &tokio::sync::mpsc::UnboundedSender<Message>,
+    message_sender: &impl MessageSender,
 ) -> Result<(), (std::path::PathBuf, FileBackupError)> {
     debug_assert!(
         !source_file.is_dir(),
@@ -604,21 +590,17 @@ async fn copy_or_skip_if_same(
     )
     .await
     {
-        message_sender
-            .send(Message::Info(Info::SkippingFileNoModification {
-                source: source_file.to_owned(),
-                destination: destination_file.to_owned(),
-            }))
-            .ok();
+        message_sender.send(Message::Info(Info::SkippingFileNoModification {
+            source: source_file.to_owned(),
+            destination: destination_file.to_owned(),
+        }));
         return Ok(());
     }
 
-    message_sender
-        .send(Message::Info(Info::StartCopingFile {
-            source: source_file.to_owned(),
-            destination: destination_file.to_owned(),
-        }))
-        .ok();
+    message_sender.send(Message::Info(Info::StartCopingFile {
+        source: source_file.to_owned(),
+        destination: destination_file.to_owned(),
+    }));
     tokio::fs::copy(source_file, destination_file)
         .await
         .map_err(|e| {
@@ -628,24 +610,20 @@ async fn copy_or_skip_if_same(
             )
         })
         .inspect(|_| {
-            message_sender
-                .send(Message::Info(Info::FileCopied {
-                    source: source_file.to_owned(),
-                    destination: destination_file.to_owned(),
-                }))
-                .ok();
+            message_sender.send(Message::Info(Info::FileCopied {
+                source: source_file.to_owned(),
+                destination: destination_file.to_owned(),
+            }));
         })?;
 
     if set_modified_time(&source_metadata, destination_file)
         .await
         .is_none()
     {
-        message_sender
-            .send(Message::Warning(Warning::CannotCopyModifiedTime {
-                source: source_file.to_owned(),
-                destination: destination_file.to_owned(),
-            }))
-            .ok();
+        message_sender.send(Message::Warning(Warning::CannotCopyModifiedTime {
+            source: source_file.to_owned(),
+            destination: destination_file.to_owned(),
+        }));
     }
 
     Ok(())
@@ -727,7 +705,7 @@ async fn get_paths_in_destinatination_but_not_in_source(
 fn validate_or_create_root_paths<P: AsRef<std::path::Path>>(
     source_directory_root: P,
     destination_directory_root: P,
-    message_sender: &tokio::sync::mpsc::UnboundedSender<Message>,
+    message_sender: &impl MessageSender,
 ) -> Result<(), Error> {
     let source_directory_root = source_directory_root.as_ref();
     let destination_directory_root = destination_directory_root.as_ref();
@@ -741,8 +719,7 @@ fn validate_or_create_root_paths<P: AsRef<std::path::Path>>(
         message_sender
             .send(Message::Info(Info::CreatingDestinationDir(
                 destination_directory_root.to_owned(),
-            )))
-            .ok();
+            )));
         std::fs::create_dir_all(destination_directory_root)
             .map_err(|e| {
                 Error::CannotCreateRootDestinationDir(
@@ -754,8 +731,7 @@ fn validate_or_create_root_paths<P: AsRef<std::path::Path>>(
                 message_sender
                     .send(Message::Info(Info::DestinationDirCreated(
                         destination_directory_root.to_owned(),
-                    )))
-                    .ok();
+                    )));
             })?;
     }
     if !destination_directory_root.is_dir() {
@@ -768,7 +744,7 @@ fn validate_or_create_root_paths<P: AsRef<std::path::Path>>(
 async fn backup<P: AsRef<std::path::Path>>(
     source_directory_root: P,
     destination_directory_root: P,
-    message_sender: &tokio::sync::mpsc::UnboundedSender<Message>,
+    message_sender: &impl MessageSender,
 ) -> Result<(), Error> {
     let source_directory_root = source_directory_root.as_ref();
     let destination_directory_root = destination_directory_root.as_ref();
@@ -815,10 +791,7 @@ pub enum Command {
     },
 }
 
-pub async fn run(
-    commands: Command,
-    message_sender: tokio::sync::mpsc::UnboundedSender<Message>,
-) -> Result<(), Error> {
+pub async fn run(commands: Command, message_sender: impl MessageSender) -> Result<(), Error> {
     match commands {
         Command::Backup {
             source_root,
@@ -877,7 +850,7 @@ fn get_destination_file_path(
 async fn purge_files_and_dirs_in_destination<P: AsRef<std::path::Path>>(
     source_root: P,
     destination_root: P,
-    message_sender: &tokio::sync::mpsc::UnboundedSender<Message>,
+    message_sender: &impl MessageSender,
 ) -> Result<(), Error> {
     use futures::stream::StreamExt;
 
@@ -907,38 +880,28 @@ async fn purge_files_and_dirs_in_destination<P: AsRef<std::path::Path>>(
     while let Some(dir) = dir_stream.next().await {
         if deleted_dirs.iter().any(|d| dir.starts_with(d)) {
             done += 1;
-            message_sender
-                .send(Message::Progress {
-                    progress: Progress::DeleteDirs,
-                    done,
-                    total: num_dirs,
-                })
-                .ok();
+            message_sender.send(Message::Progress {
+                progress: Progress::DeleteDirs,
+                done,
+                total: num_dirs,
+            });
             continue;
         }
-        message_sender
-            .send(Message::Info(Info::StartDeletingDir(dir.clone())))
-            .ok();
+        message_sender.send(Message::Info(Info::StartDeletingDir(dir.clone())));
 
         if let Err(e) = tokio::fs::remove_dir_all(&dir).await {
             let error = (dir, FileBackupError::CannotDeleteDirectory(e.to_string()));
             errors.push(error.clone());
             // NOTE: Early feedback
-            message_sender
-                .send(Message::Error(Error::FileBackupErrors(vec![error])))
-                .ok();
+            message_sender.send(Message::Error(Error::FileBackupErrors(vec![error])));
         } else {
             done += 1;
-            message_sender
-                .send(Message::Info(Info::DeletedDir(dir.clone())))
-                .ok();
-            message_sender
-                .send(Message::Progress {
-                    progress: Progress::DeleteDirs,
-                    done,
-                    total: num_dirs,
-                })
-                .ok();
+            message_sender.send(Message::Info(Info::DeletedDir(dir.clone())));
+            message_sender.send(Message::Progress {
+                progress: Progress::DeleteDirs,
+                done,
+                total: num_dirs,
+            });
             deleted_dirs.push(dir);
         }
     }
@@ -960,9 +923,7 @@ async fn purge_files_and_dirs_in_destination<P: AsRef<std::path::Path>>(
     let num_files = futures::stream::iter(files_to_delete.clone()).count().await;
     let mut errors_file: Vec<_> = futures::stream::iter(files_to_delete)
         .map(async |file| {
-            message_sender
-                .send(Message::Info(Info::StartDeletingFile(file.clone())))
-                .ok();
+            message_sender.send(Message::Info(Info::StartDeletingFile(file.clone())));
             tokio::fs::remove_file(&file)
                 .await
                 .map_err(|e| {
@@ -973,21 +934,15 @@ async fn purge_files_and_dirs_in_destination<P: AsRef<std::path::Path>>(
                 })
                 .inspect_err(|e| {
                     // NOTE: Early feedback
-                    message_sender
-                        .send(Message::Error(Error::FileBackupErrors(vec![e.clone()])))
-                        .ok();
+                    message_sender.send(Message::Error(Error::FileBackupErrors(vec![e.clone()])));
                 })
                 .inspect(|_| {
-                    message_sender
-                        .send(Message::Info(Info::DeletedFile(file.clone())))
-                        .ok();
-                    message_sender
-                        .send(Message::Progress {
-                            progress: Progress::DeleteFiles,
-                            done: done.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
-                            total: num_files,
-                        })
-                        .ok();
+                    message_sender.send(Message::Info(Info::DeletedFile(file.clone())));
+                    message_sender.send(Message::Progress {
+                        progress: Progress::DeleteFiles,
+                        done: done.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+                        total: num_files,
+                    });
                 })
         })
         .buffer_unordered(cpu_count())

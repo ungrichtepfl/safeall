@@ -104,9 +104,18 @@ impl std::fmt::Display for Error {
     }
 }
 
+struct CliMessageSender(tokio::sync::mpsc::UnboundedSender<safeall::Message>);
+
+impl safeall::MessageSender for CliMessageSender {
+    fn send(&self, message: safeall::Message) {
+        self.0.send(message).ok();
+    }
+}
+
 async fn cli() -> Result<(), Error> {
     let cli_args = CliArgs::parse();
     let (message_sender, mut message_receiver) = tokio::sync::mpsc::unbounded_channel();
+    let message_sender = CliMessageSender(message_sender);
     let run =
         tokio::spawn(async move { safeall::run(cli_args.command.into(), message_sender).await });
 
