@@ -110,33 +110,119 @@ async fn cli() -> Result<(), Error> {
     let run =
         tokio::spawn(async move { safeall::run(cli_args.command.into(), message_sender).await });
 
-    let bar = indicatif::ProgressBar::no_length();
-    let style = indicatif::ProgressStyle::default_bar()
-        .template("{wide_msg}\n{pos:>7}/{len:7} {bar:40.cyan/blue}")
-        .unwrap();
-    bar.set_style(style);
-    let mut total = 0;
-    let mut done = 0;
     while let Some(message) = message_receiver.recv().await {
         use safeall::Message as M;
         match message {
-            M::Warning(warning) => println!("WARNING: {warning}"),
-            M::Info(info) => bar.set_message(info),
+            M::Warning(warning) => match warning {
+                safeall::Warning::CannotGetMetadata {
+                    source,
+                    destination,
+                    copy_anyway,
+                } => {
+                    let copy_text = if copy_anyway {
+                        "We try to copy the file anyway."
+                    } else {
+                        "File will not be backed up."
+                    };
+                    println!(
+                        "WARNING: Cannot get metadata for either \"{}\" or \"{}\". {copy_text}",
+                        source.display(),
+                        destination.display()
+                    )
+                }
+                safeall::Warning::CannotGetHash {
+                    source,
+                    destination,
+                    copy_anyway,
+                } => {
+                    let copy_text = if copy_anyway {
+                        "We try to copy the file anyway."
+                    } else {
+                        "File will not be backed up."
+                    };
+                    println!(
+                        "WARNING: Cannot get the hashes for either \"{}\" or \"{}\". {copy_text}",
+                        source.display(),
+                        destination.display()
+                    )
+                }
+                safeall::Warning::CannotCopyModifiedTime {
+                    source,
+                    destination,
+                } => println!(
+                    "WARNING: Cannot copy the modification times from \"{}\" to \"{}\".",
+                    source.display(),
+                    destination.display()
+                ),
+            },
+            M::Info(info) => match info {
+                safeall::Info::SkippingFileNoModification {
+                    source,
+                    destination,
+                } => println!(
+                    "Skipping \"{}\", \"{}\" is up to date.",
+                    source.display(),
+                    destination.display()
+                ),
+                safeall::Info::StartCopingFile {
+                    source,
+                    destination,
+                } => println!(
+                    "Start backing up \"{}\" to \"{}\".",
+                    source.display(),
+                    destination.display()
+                ),
+                safeall::Info::DestinationDirCreated(path_buf) => {
+                    println!("Creating directory \"{}\".", path_buf.display(),)
+                }
+                safeall::Info::DirCreated {
+                    source,
+                    destination,
+                } => println!(
+                    "Created \"{}\" for \"{}\".",
+                    destination.display(),
+                    source.display(),
+                ),
+                safeall::Info::DestinationDirAlreadyExists {
+                    source,
+                    destination,
+                } => println!(
+                    "\"{}\" for \"{}\" already exists, will not be created.",
+                    destination.display(),
+                    source.display(),
+                ),
+                safeall::Info::CreatingDestinationDir(path_buf) => {
+                    println!("Creating backup destination \"{}\".", path_buf.display(),)
+                }
+                safeall::Info::FileCopied {
+                    source,
+                    destination,
+                } => println!(
+                    "Finished backing up \"{}\" to \"{}\".",
+                    source.display(),
+                    destination.display()
+                ),
+                safeall::Info::StartDeletingDir(path_buf) => {
+                    println!("Start deleting directory \"{}\".", path_buf.display(),)
+                }
+                safeall::Info::StartDeletingFile(path_buf) => {
+                    println!("Start deleting file \"{}\".", path_buf.display(),)
+                }
+                safeall::Info::DeletedFile(path_buf) => {
+                    println!("Finished deleting file \"{}\".", path_buf.display(),)
+                }
+                safeall::Info::DeletedDir(path_buf) => {
+                    println!("Finished deleting directory \"{}\".", path_buf.display(),)
+                }
+            },
+            M::Error(error) => eprintln!("ERROR: {error}"),
             M::Progress {
                 progress: _,
-                done: d,
-                total: t,
-            } => {
-                bar.set_length(t as u64);
-                total = t;
-                bar.set_position(d as u64);
-                done = d;
-            }
+                done: _,
+                total: _,
+            } => {}
         }
     }
-    bar.finish_and_clear();
-    println!("Done!");
-    println!("{done}/{total} files have been backed up.");
 
     let res = run.await?;
     res?;

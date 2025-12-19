@@ -62,7 +62,7 @@ impl Iterator for RecursiveReadDir {
                     Err(error) => {
                         return Some(Err((
                             self.current_dirpath.clone(),
-                            E::CannotGetDirEntry(error),
+                            E::CannotGetDirEntry(error.to_string()),
                         )));
                     }
                 }
@@ -85,7 +85,10 @@ impl Iterator for RecursiveReadDir {
                         }
                     }
                     Err(error) => {
-                        return Some(Err((next_readdir, E::CannotReadDirectoryContent(error))));
+                        return Some(Err((
+                            next_readdir,
+                            E::CannotReadDirectoryContent(error.to_string()),
+                        )));
                     }
                 }
             }
@@ -102,7 +105,7 @@ impl Iterator for RecursiveReadDir {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum InvariantError {
     CannotStripPrefixOfPath(
         std::path::PathBuf,
@@ -128,17 +131,17 @@ impl std::fmt::Display for InvariantError {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum FileBackupError {
-    CannotCreateDestinationDir(std::path::PathBuf, std::io::Error),
-    CannotReadDirectoryContent(std::io::Error),
-    CannotGetDirEntry(std::io::Error),
+    CannotCreateDestinationDir(std::path::PathBuf, String),
+    CannotReadDirectoryContent(String),
+    CannotGetDirEntry(String),
     DestinationForSourceDirExistsAsFile(std::path::PathBuf),
-    CannotCopyFile(std::path::PathBuf, std::io::Error),
+    CannotCopyFile(std::path::PathBuf, String),
     CouldNotGenerateDestinationPath(std::path::StripPrefixError),
     InvariantBroken(InvariantError),
-    CannotDeleteDirectory(std::io::Error),
-    CannotDeleteFile(std::io::Error),
+    CannotDeleteDirectory(String),
+    CannotDeleteFile(String),
 }
 
 impl std::error::Error for FileBackupError {}
@@ -187,12 +190,12 @@ impl std::fmt::Display for FileBackupError {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum Error {
     FileBackupErrors(Vec<(std::path::PathBuf, FileBackupError)>),
     SourceRootPathDoesNotExist(std::path::PathBuf),
-    CannotReadDirectoryContent(std::path::PathBuf, std::io::Error),
-    CannotCreateRootDestinationDir(std::path::PathBuf, std::io::Error),
+    CannotReadDirectoryContent(std::path::PathBuf, String),
+    CannotCreateRootDestinationDir(std::path::PathBuf, String),
     RootDestinatinIsNotADirectory(std::path::PathBuf),
 }
 
@@ -243,14 +246,16 @@ async fn backup_all_files(
         "Destination is not a dir"
     );
     let source_recurse_files =
-        RecursiveReadDir::try_new(source_directory_root, ReadDirType::FilesOnly)
-            .map_err(|e| Error::CannotReadDirectoryContent(source_directory_root.to_owned(), e))?;
+        RecursiveReadDir::try_new(source_directory_root, ReadDirType::FilesOnly).map_err(|e| {
+            Error::CannotReadDirectoryContent(source_directory_root.to_owned(), e.to_string())
+        })?;
 
     use futures::stream::StreamExt;
     let num_files = futures::stream::iter(source_recurse_files).count().await;
     let source_recurse_files =
-        RecursiveReadDir::try_new(source_directory_root, ReadDirType::FilesOnly)
-            .map_err(|e| Error::CannotReadDirectoryContent(source_directory_root.to_owned(), e))?;
+        RecursiveReadDir::try_new(source_directory_root, ReadDirType::FilesOnly).map_err(|e| {
+            Error::CannotReadDirectoryContent(source_directory_root.to_owned(), e.to_string())
+        })?;
     let done = std::sync::atomic::AtomicUsize::new(1);
     let errors: Vec<_> = futures::stream::iter(source_recurse_files)
         .map(async |source_file| {
@@ -269,10 +274,16 @@ async fn backup_all_files(
                 message_sender,
             )
             .await
+            .inspect_err(|e| {
+                // NOTE: Early feedback
+                message_sender
+                    .send(Message::Error(Error::FileBackupErrors(vec![e.clone()])))
+                    .ok();
+            })
             .inspect(|_| {
                 message_sender
                     .send(Message::Progress {
-                        progress: Progress::Copy,
+                        progress: Progress::CopyFiles,
                         done: done.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
                         total: num_files,
                     })
@@ -300,79 +311,122 @@ async fn backup_single_file(
         &source_file,
     )?;
 
-    copy_if_newer(&source_file, &new_destination_file, message_sender).await
+    copy_or_skip_if_same(&source_file, &new_destination_file, message_sender).await
 }
 
-#[must_use]
 async fn create_all_directories_in_destination(
-    source_recurse_directories: RecursiveReadDir,
+    source_directory_root: &std::path::Path,
     destination_directory_root: &std::path::Path,
-) -> Vec<(std::path::PathBuf, FileBackupError)> {
-    debug_assert!(
-        source_recurse_directories.root_directory().is_dir(),
-        "Source is not a dir"
-    );
+    message_sender: &tokio::sync::mpsc::UnboundedSender<Message>,
+) -> Result<Vec<(std::path::PathBuf, FileBackupError)>, Error> {
+    debug_assert!(source_directory_root.is_dir(), "Source is not a dir");
     debug_assert!(
         destination_directory_root.is_dir(),
         "Destination is not a dir"
     );
+    let source_recurse_directories =
+        RecursiveReadDir::try_new(source_directory_root, ReadDirType::DirectoriesOnly).map_err(
+            |e| Error::CannotReadDirectoryContent(source_directory_root.to_owned(), e.to_string()),
+        )?;
 
     let mut errors = vec![];
-    let source_directory_root = source_recurse_directories.root_directory().to_owned();
-    for source_directory in source_recurse_directories {
+    use futures::StreamExt;
+    let num_dirs = futures::stream::iter(source_recurse_directories)
+        .count()
+        .await;
+    let source_recurse_directories =
+        RecursiveReadDir::try_new(source_directory_root, ReadDirType::DirectoriesOnly).map_err(
+            |e| Error::CannotReadDirectoryContent(source_directory_root.to_owned(), e.to_string()),
+        )?;
+    let mut source_stream = futures::stream::iter(source_recurse_directories).enumerate();
+    while let Some((i, source_directory)) = source_stream.next().await {
         match source_directory {
             Ok(source_directory) => {
-                if errors.iter().any(|(d, _)| source_directory.starts_with(d)) {
-                    // Do do not recurse
-                    continue;
-                }
-
-                if let Err(err) = create_single_directory(
-                    &source_directory_root,
+                if let Err(err) = create_single_directory_if_not_exists(
+                    source_directory_root,
                     destination_directory_root,
                     source_directory,
+                    message_sender,
                 )
                 .await
-                {
+                .inspect_err(|e| {
+                    // NOTE: Early feedback
+                    message_sender
+                        .send(Message::Error(Error::FileBackupErrors(vec![e.clone()])))
+                        .ok();
+                })
+                .inspect(|_| {
+                    message_sender
+                        .send(Message::Progress {
+                            progress: Progress::CreateDir,
+                            done: i,
+                            total: num_dirs,
+                        })
+                        .ok();
+                }) {
                     errors.push(err);
                 }
             }
             Err(err) => errors.push(err),
         }
     }
-    errors
+    Ok(errors)
 }
 
-async fn create_single_directory(
+async fn create_single_directory_if_not_exists(
     source_directory_root: &std::path::Path,
     destination_directory_root: &std::path::Path,
     source_directory: std::path::PathBuf,
+    message_sender: &tokio::sync::mpsc::UnboundedSender<Message>,
 ) -> Result<(), (std::path::PathBuf, FileBackupError)> {
     debug_assert!(source_directory.is_dir(), "Must be a directory");
-    let new_destination_file = get_destination_file_path(
+    let new_destination_dir = get_destination_file_path(
         destination_directory_root,
         source_directory_root,
         &source_directory,
     )?;
 
-    if new_destination_file.exists() {
+    if new_destination_dir.exists() {
         // If it already exists it must be a directory too
-        if new_destination_file.is_dir() {
+        if new_destination_dir.is_dir() {
+            message_sender
+                .send(Message::Info(Info::DestinationDirAlreadyExists {
+                    source: source_directory.clone(),
+                    destination: new_destination_dir.clone(),
+                }))
+                .ok();
             Ok(())
         } else {
             Err((
                 source_directory,
-                FileBackupError::DestinationForSourceDirExistsAsFile(new_destination_file),
+                FileBackupError::DestinationForSourceDirExistsAsFile(new_destination_dir),
             ))
         }
     } else {
-        tokio::fs::create_dir(&new_destination_file)
+        message_sender
+            .send(Message::Info(Info::DirCreated {
+                source: source_directory.clone(),
+                destination: new_destination_dir.clone(),
+            }))
+            .ok();
+        tokio::fs::create_dir(&new_destination_dir)
             .await
             .map_err(|e| {
                 (
-                    source_directory,
-                    FileBackupError::CannotCreateDestinationDir(new_destination_file, e),
+                    source_directory.clone(),
+                    FileBackupError::CannotCreateDestinationDir(
+                        new_destination_dir.clone(),
+                        e.to_string(),
+                    ),
                 )
+            })
+            .inspect(|_| {
+                message_sender
+                    .send(Message::Info(Info::DirCreated {
+                        source: source_directory,
+                        destination: new_destination_dir,
+                    }))
+                    .ok();
             })
     }
 }
@@ -411,21 +465,73 @@ async fn get_hash(path: &std::path::Path) -> Option<blake3::Hash> {
     .ok()?
 }
 
+#[derive(Debug)]
 pub enum Progress {
-    Copy,
-    Delete,
+    CopyFiles,
+    DeleteFiles,
     DeleteDirs,
+    CreateDir,
 }
 
+#[derive(Debug)]
+pub enum Info {
+    SkippingFileNoModification {
+        source: std::path::PathBuf,
+        destination: std::path::PathBuf,
+    },
+    StartCopingFile {
+        source: std::path::PathBuf,
+        destination: std::path::PathBuf,
+    },
+    DestinationDirCreated(std::path::PathBuf),
+    DirCreated {
+        source: std::path::PathBuf,
+        destination: std::path::PathBuf,
+    },
+    DestinationDirAlreadyExists {
+        source: std::path::PathBuf,
+        destination: std::path::PathBuf,
+    },
+    CreatingDestinationDir(std::path::PathBuf),
+    FileCopied {
+        source: std::path::PathBuf,
+        destination: std::path::PathBuf,
+    },
+    StartDeletingDir(std::path::PathBuf),
+    StartDeletingFile(std::path::PathBuf),
+    DeletedFile(std::path::PathBuf),
+    DeletedDir(std::path::PathBuf),
+}
+
+#[derive(Debug)]
+pub enum Warning {
+    CannotGetMetadata {
+        source: std::path::PathBuf,
+        destination: std::path::PathBuf,
+        copy_anyway: bool,
+    },
+    CannotGetHash {
+        source: std::path::PathBuf,
+        destination: std::path::PathBuf,
+        copy_anyway: bool,
+    },
+    CannotCopyModifiedTime {
+        source: std::path::PathBuf,
+        destination: std::path::PathBuf,
+    },
+}
+
+#[derive(Debug)]
 pub enum Message {
     // TODO: Maybe we should send the errors here?
-    Warning(String),
-    Info(String),
+    Warning(Warning),
+    Info(Info),
     Progress {
         progress: Progress,
         done: usize,
         total: usize,
     },
+    Error(Error),
 }
 
 async fn skip_copy(
@@ -441,11 +547,13 @@ async fn skip_copy(
     if destination_metadata.is_none() && source_metadata.is_some()
         || destination_metadata.is_some() && source_metadata.is_none()
     {
-        message_sender.send(Message::Warning(format!(
-            "we can get the metadata from one file but not the other. We just try to copy it anyway. Files: \"{}\" and \"{}\"",
-            source_file.display(),
-            destination_file.display()
-            ))).ok();
+        message_sender
+            .send(Message::Warning(Warning::CannotGetMetadata {
+                source: source_file.to_owned(),
+                destination: destination_file.to_owned(),
+                copy_anyway: true,
+            }))
+            .ok();
         return false;
     }
 
@@ -462,18 +570,18 @@ async fn skip_copy(
         }
     } else {
         message_sender
-            .send(Message::Warning(format!(
-                "WARNING: Cannot get hash of either {} or {}. We just try to copy the file anyway.",
-                source_file.display(),
-                destination_file.display()
-            )))
+            .send(Message::Warning(Warning::CannotGetHash {
+                source: source_file.to_owned(),
+                destination: destination_file.to_owned(),
+                copy_anyway: true,
+            }))
             .ok();
     }
 
     true
 }
 
-async fn copy_if_newer(
+async fn copy_or_skip_if_same(
     source_file: &std::path::Path,
     destination_file: &std::path::Path,
     message_sender: &tokio::sync::mpsc::UnboundedSender<Message>,
@@ -497,40 +605,46 @@ async fn copy_if_newer(
     .await
     {
         message_sender
-            .send(Message::Info(format!(
-                "Not copying \"{}\" as destination \"{}\" did not change.",
-                source_file.display(),
-                destination_file.display()
-            )))
+            .send(Message::Info(Info::SkippingFileNoModification {
+                source: source_file.to_owned(),
+                destination: destination_file.to_owned(),
+            }))
             .ok();
         return Ok(());
     }
 
+    message_sender
+        .send(Message::Info(Info::StartCopingFile {
+            source: source_file.to_owned(),
+            destination: destination_file.to_owned(),
+        }))
+        .ok();
     tokio::fs::copy(source_file, destination_file)
         .await
         .map_err(|e| {
             (
                 source_file.to_owned(),
-                FileBackupError::CannotCopyFile(destination_file.to_owned(), e),
+                FileBackupError::CannotCopyFile(destination_file.to_owned(), e.to_string()),
             )
+        })
+        .inspect(|_| {
+            message_sender
+                .send(Message::Info(Info::FileCopied {
+                    source: source_file.to_owned(),
+                    destination: destination_file.to_owned(),
+                }))
+                .ok();
         })?;
-    message_sender
-        .send(Message::Info(format!(
-            "Copied \"{}\" to \"{}\"",
-            source_file.display(),
-            destination_file.display()
-        )))
-        .ok();
+
     if set_modified_time(&source_metadata, destination_file)
         .await
         .is_none()
     {
         message_sender
-            .send(Message::Warning(format!(
-                "Could not copy modified time from \"{}\" to destination file \"{}\"",
-                source_file.display(),
-                destination_file.display()
-            )))
+            .send(Message::Warning(Warning::CannotCopyModifiedTime {
+                source: source_file.to_owned(),
+                destination: destination_file.to_owned(),
+            }))
             .ok();
     }
 
@@ -610,9 +724,10 @@ async fn get_paths_in_destinatination_but_not_in_source(
     res.sort(); // Such that foo/bar/baz is after foo/bar
     Ok(res)
 }
-fn validate_root_paths<P: AsRef<std::path::Path>>(
+fn validate_or_create_root_paths<P: AsRef<std::path::Path>>(
     source_directory_root: P,
     destination_directory_root: P,
+    message_sender: &tokio::sync::mpsc::UnboundedSender<Message>,
 ) -> Result<(), Error> {
     let source_directory_root = source_directory_root.as_ref();
     let destination_directory_root = destination_directory_root.as_ref();
@@ -622,13 +737,26 @@ fn validate_root_paths<P: AsRef<std::path::Path>>(
             source_directory_root.to_owned(),
         ));
     }
-    if !destination_directory_root.exists()
-        && let Err(e) = std::fs::create_dir_all(destination_directory_root)
-    {
-        return Err(Error::CannotCreateRootDestinationDir(
-            destination_directory_root.to_owned(),
-            e,
-        ));
+    if !destination_directory_root.exists() {
+        message_sender
+            .send(Message::Info(Info::CreatingDestinationDir(
+                destination_directory_root.to_owned(),
+            )))
+            .ok();
+        std::fs::create_dir_all(destination_directory_root)
+            .map_err(|e| {
+                Error::CannotCreateRootDestinationDir(
+                    destination_directory_root.to_owned(),
+                    e.to_string(),
+                )
+            })
+            .inspect(|_| {
+                message_sender
+                    .send(Message::Info(Info::DestinationDirCreated(
+                        destination_directory_root.to_owned(),
+                    )))
+                    .ok();
+            })?;
     }
     if !destination_directory_root.is_dir() {
         return Err(Error::RootDestinatinIsNotADirectory(
@@ -645,15 +773,12 @@ async fn backup<P: AsRef<std::path::Path>>(
     let source_directory_root = source_directory_root.as_ref();
     let destination_directory_root = destination_directory_root.as_ref();
 
-    let source_recurse_directories =
-        RecursiveReadDir::try_new(source_directory_root, ReadDirType::DirectoriesOnly)
-            .map_err(|e| Error::CannotReadDirectoryContent(source_directory_root.to_owned(), e))?;
-
     let mut errors = create_all_directories_in_destination(
-        source_recurse_directories,
+        source_directory_root,
         destination_directory_root,
+        message_sender,
     )
-    .await;
+    .await?;
     let non_exsting_destination_directories: Vec<_> =
         errors.iter().map(|(p, _)| p.as_path()).collect();
 
@@ -699,14 +824,14 @@ pub async fn run(
             source_root,
             destination_root,
         } => {
-            validate_root_paths(&source_root, &destination_root)?;
+            validate_or_create_root_paths(&source_root, &destination_root, &message_sender)?;
             backup(&source_root, &destination_root, &message_sender).await
         }
         Command::Sync {
             source_root,
             destination_root,
         } => {
-            validate_root_paths(&source_root, &destination_root)?;
+            validate_or_create_root_paths(&source_root, &destination_root, &message_sender)?;
             backup(&source_root, &destination_root, &message_sender).await?;
             purge_files_and_dirs_in_destination(&source_root, &destination_root, &message_sender)
                 .await?;
@@ -717,7 +842,7 @@ pub async fn run(
             destination_root,
             delete_files,
         } => {
-            validate_root_paths(&source_root, &destination_root)?;
+            validate_or_create_root_paths(&source_root, &destination_root, &message_sender)?;
             // NOTE: Same as sync but switch arguments
             backup(&destination_root, &source_root, &message_sender).await?;
             if delete_files {
@@ -759,11 +884,13 @@ async fn purge_files_and_dirs_in_destination<P: AsRef<std::path::Path>>(
     let source_root = source_root.as_ref();
     let destination_root = destination_root.as_ref();
     let source_recurse_directories =
-        RecursiveReadDir::try_new(source_root, ReadDirType::DirectoriesOnly)
-            .map_err(|e| Error::CannotReadDirectoryContent(source_root.to_owned(), e))?;
+        RecursiveReadDir::try_new(source_root, ReadDirType::DirectoriesOnly).map_err(|e| {
+            Error::CannotReadDirectoryContent(source_root.to_owned(), e.to_string())
+        })?;
     let destination_recurse_directories =
-        RecursiveReadDir::try_new(destination_root, ReadDirType::DirectoriesOnly)
-            .map_err(|e| Error::CannotReadDirectoryContent(destination_root.to_owned(), e))?;
+        RecursiveReadDir::try_new(destination_root, ReadDirType::DirectoriesOnly).map_err(|e| {
+            Error::CannotReadDirectoryContent(destination_root.to_owned(), e.to_string())
+        })?;
 
     let dirs_to_delete = get_paths_in_destinatination_but_not_in_source(
         source_recurse_directories,
@@ -779,12 +906,32 @@ async fn purge_files_and_dirs_in_destination<P: AsRef<std::path::Path>>(
     let mut done = 0;
     while let Some(dir) = dir_stream.next().await {
         if deleted_dirs.iter().any(|d| dir.starts_with(d)) {
+            done += 1;
+            message_sender
+                .send(Message::Progress {
+                    progress: Progress::DeleteDirs,
+                    done,
+                    total: num_dirs,
+                })
+                .ok();
             continue;
         }
+        message_sender
+            .send(Message::Info(Info::StartDeletingDir(dir.clone())))
+            .ok();
+
         if let Err(e) = tokio::fs::remove_dir_all(&dir).await {
-            errors.push((dir, FileBackupError::CannotDeleteDirectory(e)));
+            let error = (dir, FileBackupError::CannotDeleteDirectory(e.to_string()));
+            errors.push(error.clone());
+            // NOTE: Early feedback
+            message_sender
+                .send(Message::Error(Error::FileBackupErrors(vec![error])))
+                .ok();
         } else {
             done += 1;
+            message_sender
+                .send(Message::Info(Info::DeletedDir(dir.clone())))
+                .ok();
             message_sender
                 .send(Message::Progress {
                     progress: Progress::DeleteDirs,
@@ -797,10 +944,11 @@ async fn purge_files_and_dirs_in_destination<P: AsRef<std::path::Path>>(
     }
 
     let source_recurse_files = RecursiveReadDir::try_new(source_root, ReadDirType::FilesOnly)
-        .map_err(|e| Error::CannotReadDirectoryContent(source_root.to_owned(), e))?;
+        .map_err(|e| Error::CannotReadDirectoryContent(source_root.to_owned(), e.to_string()))?;
     let destination_recurse_files =
-        RecursiveReadDir::try_new(destination_root, ReadDirType::FilesOnly)
-            .map_err(|e| Error::CannotReadDirectoryContent(destination_root.to_owned(), e))?;
+        RecursiveReadDir::try_new(destination_root, ReadDirType::FilesOnly).map_err(|e| {
+            Error::CannotReadDirectoryContent(destination_root.to_owned(), e.to_string())
+        })?;
 
     let files_to_delete = get_paths_in_destinatination_but_not_in_source(
         source_recurse_files,
@@ -812,15 +960,34 @@ async fn purge_files_and_dirs_in_destination<P: AsRef<std::path::Path>>(
     let num_files = futures::stream::iter(files_to_delete.clone()).count().await;
     let mut errors_file: Vec<_> = futures::stream::iter(files_to_delete)
         .map(async |file| {
+            message_sender
+                .send(Message::Info(Info::StartDeletingFile(file.clone())))
+                .ok();
             tokio::fs::remove_file(&file)
                 .await
-                .map_err(|e| (file.to_owned(), FileBackupError::CannotDeleteFile(e)))
-                .map(|_| {
-                    message_sender.send(Message::Progress {
-                        progress: Progress::DeleteDirs,
-                        done: done.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
-                        total: num_files,
-                    })
+                .map_err(|e| {
+                    (
+                        file.to_owned(),
+                        FileBackupError::CannotDeleteFile(e.to_string()),
+                    )
+                })
+                .inspect_err(|e| {
+                    // NOTE: Early feedback
+                    message_sender
+                        .send(Message::Error(Error::FileBackupErrors(vec![e.clone()])))
+                        .ok();
+                })
+                .inspect(|_| {
+                    message_sender
+                        .send(Message::Info(Info::DeletedFile(file.clone())))
+                        .ok();
+                    message_sender
+                        .send(Message::Progress {
+                            progress: Progress::DeleteFiles,
+                            done: done.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+                            total: num_files,
+                        })
+                        .ok();
                 })
         })
         .buffer_unordered(cpu_count())
