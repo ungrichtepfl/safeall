@@ -48,10 +48,10 @@ impl RecursiveReadDir {
 }
 
 impl Iterator for RecursiveReadDir {
-    type Item = Result<std::path::PathBuf, (std::path::PathBuf, FileBackupError)>;
+    type Item = Result<std::path::PathBuf, ProcessPathError>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        use FileBackupError as E;
+        use FileBackupErrorKind as K;
         'drain_current_readdir: loop {
             for entry in &mut self.current_readdir {
                 match entry {
@@ -64,10 +64,13 @@ impl Iterator for RecursiveReadDir {
                         }
                     }
                     Err(error) => {
-                        return Some(Err((
-                            self.current_dirpath.clone(),
-                            E::CannotGetDirEntry(error.to_string()),
-                        )));
+                        return Some(Err(ProcessPathError {
+                            not_processed: None,
+                            kind: K::CannotGetDirEntry {
+                                in_dir: self.current_dirpath.clone(),
+                                io_error: error.to_string(),
+                            },
+                        }));
                     }
                 }
             }
@@ -89,10 +92,12 @@ impl Iterator for RecursiveReadDir {
                         }
                     }
                     Err(error) => {
-                        return Some(Err((
-                            next_readdir,
-                            E::CannotReadDirectoryContent(error.to_string()),
-                        )));
+                        return Some(Err(ProcessPathError {
+                            not_processed: Some(next_readdir),
+                            kind: K::CannotReadDirectoryContent {
+                                io_error: error.to_string(),
+                            },
+                        }));
                     }
                 }
             }
@@ -111,11 +116,11 @@ impl Iterator for RecursiveReadDir {
 
 #[derive(Debug, Clone)]
 pub enum InvariantError {
-    CannotStripPrefixOfPath(
-        std::path::PathBuf,
-        std::path::PathBuf,
-        std::path::StripPrefixError,
-    ),
+    CannotStripPrefixOfPath {
+        path_root: std::path::PathBuf,
+        path: std::path::PathBuf,
+        error: std::path::StripPrefixError,
+    },
 }
 
 impl std::error::Error for InvariantError {}
@@ -123,10 +128,14 @@ impl std::error::Error for InvariantError {}
 impl std::fmt::Display for InvariantError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            InvariantError::CannotStripPrefixOfPath(path_root, path, strip_prefix_error) => {
+            InvariantError::CannotStripPrefixOfPath {
+                path_root,
+                path,
+                error,
+            } => {
                 write!(
                     f,
-                    "cannot strip prefix \"{}\" from \"{}\" => {strip_prefix_error}",
+                    "cannot strip prefix \"{}\" from \"{}\" => {error}",
                     path_root.display(),
                     path.display()
                 )
@@ -136,59 +145,90 @@ impl std::fmt::Display for InvariantError {
 }
 
 #[derive(Debug, Clone)]
-pub enum FileBackupError {
-    CannotCreateDestinationDir(std::path::PathBuf, String),
-    CannotReadDirectoryContent(String),
-    CannotGetDirEntry(String),
-    DestinationForSourceDirExistsAsFile(std::path::PathBuf),
-    CannotCopyFile(std::path::PathBuf, String),
-    CouldNotGenerateDestinationPath(std::path::StripPrefixError),
-    InvariantBroken(InvariantError),
-    CannotDeleteDirectory(String),
-    CannotDeleteFile(String),
+pub struct ProcessPathError {
+    pub not_processed: Option<std::path::PathBuf>,
+    pub kind: FileBackupErrorKind,
 }
 
-impl std::error::Error for FileBackupError {}
+#[derive(Debug, Clone)]
+pub enum FileBackupErrorKind {
+    CannotCreateDestinationDir {
+        destination: std::path::PathBuf,
+        io_error: String,
+    },
+    CannotReadDirectoryContent {
+        io_error: String,
+    },
+    CannotGetDirEntry {
+        in_dir: std::path::PathBuf,
+        io_error: String,
+    },
+    DestinationForSourceDirExistsAsFile {
+        destination: std::path::PathBuf,
+    },
+    CannotCopyFile {
+        to: std::path::PathBuf,
+        io_error: String,
+    },
+    InvariantBroken(InvariantError),
+    CannotDeleteDirectory {
+        io_error: String,
+    },
+    CannotDeleteFile {
+        io_error: String,
+    },
+}
 
-impl std::fmt::Display for FileBackupError {
+impl std::error::Error for ProcessPathError {}
+
+impl std::fmt::Display for ProcessPathError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            FileBackupError::CannotCreateDestinationDir(path, error) => {
+        use FileBackupErrorKind as K;
+        let prefix = if let Some(ref not_processed) = self.not_processed {
+            format!("Could not process \"{}\". ", not_processed.display())
+        } else {
+            String::new()
+        };
+        match &self.kind {
+            K::CannotCreateDestinationDir {
+                destination,
+                io_error,
+            } => {
                 write!(
                     f,
-                    "cannot create destination path \"{}\" because {error}",
-                    path.display()
+                    "{prefix}Cannot create destination path \"{}\": {io_error}.",
+                    destination.display(),
                 )
             }
-            FileBackupError::CannotReadDirectoryContent(error) => {
-                write!(f, "could not read source directory because {error}")
+            K::CannotReadDirectoryContent { io_error } => {
+                write!(f, "{prefix}Could not read directory: {io_error}.")
             }
-            FileBackupError::CannotGetDirEntry(error) => {
-                write!(f, "could not read entries of directory because {error}")
+            K::CannotGetDirEntry { in_dir, io_error } => {
+                write!(
+                    f,
+                    "{prefix}Could not read entries of directory \"{}\": {io_error}.",
+                    in_dir.display()
+                )
             }
-            FileBackupError::DestinationForSourceDirExistsAsFile(destination_dir) => write!(
+            K::DestinationForSourceDirExistsAsFile { destination } => write!(
                 f,
-                "could not create a new destination directory \"{}\" as the destination already exists but not as a directory",
-                destination_dir.display()
+                "{prefix}Could not create a new destination directory \"{}\" because the destination already exists but not as a directory.",
+                destination.display(),
             ),
-            FileBackupError::CannotCopyFile(destination_file, error) => write!(
+            K::CannotCopyFile { to, io_error } => write!(
                 f,
-                "could not copy file to destination \"{}\" because {error}",
-                destination_file.display()
+                "{prefix}Could not copy file to \"{}\". {io_error}.",
+                to.display()
             ),
-            FileBackupError::CouldNotGenerateDestinationPath(strip_prefix_error) => write!(
+            K::InvariantBroken(invariant_error) => write!(
                 f,
-                "could not generate destination path because {strip_prefix_error}"
+                "{prefix}There is some problem with the program. Contact the maintainer {MAINTAINER_EMAIL} to fix the error. Error: \"{invariant_error}\""
             ),
-            FileBackupError::InvariantBroken(error) => write!(
-                f,
-                "there is some problem with the program. Contact the maintainer {MAINTAINER_EMAIL} to fix the error. Error: {error}"
-            ),
-            FileBackupError::CannotDeleteDirectory(error) => {
-                write!(f, "cannot delet directory because {error}")
+            K::CannotDeleteDirectory { io_error } => {
+                write!(f, "{prefix}Cannot delet directory: {io_error}.")
             }
-            FileBackupError::CannotDeleteFile(error) => {
-                write!(f, "cannot delete file because {error}")
+            K::CannotDeleteFile { io_error } => {
+                write!(f, "{prefix}Cannot delete file: {io_error}.")
             }
         }
     }
@@ -196,7 +236,7 @@ impl std::fmt::Display for FileBackupError {
 
 #[derive(Debug, Clone)]
 pub enum Error {
-    FileBackupErrors(Vec<(std::path::PathBuf, FileBackupError)>),
+    FileBackupErrors(Vec<ProcessPathError>),
     SourceRootPathDoesNotExist(std::path::PathBuf),
     CannotReadDirectoryContent(std::path::PathBuf, String),
     CannotCreateRootDestinationDir(std::path::PathBuf, String),
@@ -208,31 +248,29 @@ impl std::error::Error for Error {}
 impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Error::FileBackupErrors(errors) => {
-                errors.iter().enumerate().try_for_each(|(i, (p, e))| {
-                    let end = if i == errors.len() - 1 { "" } else { "\n" };
-                    write!(f, "could not backup \"{}\" because {e}{end}", p.display())
-                })
-            }
-            Error::SourceRootPathDoesNotExist(path_buf) => write!(
+            Error::FileBackupErrors(errors) => errors.iter().enumerate().try_for_each(|(i, e)| {
+                let end = if i == errors.len() - 1 { "" } else { "\n" };
+                write!(f, "{e}{end}")
+            }),
+            Error::SourceRootPathDoesNotExist(path) => write!(
                 f,
-                "the specified source directory \"{}\" does not exists",
+                "The specified source directory \"{}\" does not exists.",
+                path.display()
+            ),
+            Error::CannotCreateRootDestinationDir(path_buf, io_error) => write!(
+                f,
+                "Cannot create a new destination directory \"{}\": {io_error}.",
                 path_buf.display()
             ),
-            Error::CannotCreateRootDestinationDir(path_buf, error) => write!(
+            Error::RootDestinatinIsNotADirectory(path) => write!(
                 f,
-                "cannot create a new destination directory \"{}\" because {error}",
-                path_buf.display()
+                "Specified destination \"{}\" is not a directory but a file.",
+                path.display()
             ),
-            Error::RootDestinatinIsNotADirectory(path_buf) => write!(
+            Error::CannotReadDirectoryContent(path, error) => write!(
                 f,
-                "specified destination \"{}\" is not a directory but a file",
-                path_buf.display()
-            ),
-            Error::CannotReadDirectoryContent(path_buf, error) => write!(
-                f,
-                "cannot iterate through directory\"{}\" because {error}",
-                path_buf.display()
+                "Cannot iterate through directory\"{}\": {error}.",
+                path.display()
             ),
         }
     }
@@ -241,9 +279,9 @@ impl std::fmt::Display for Error {
 async fn backup_all_files(
     source_directory_root: &std::path::Path,
     destination_directory_root: &std::path::Path,
-    not_existing_destination_directories: &[&std::path::Path],
+    not_existing_destination_directories: &[&std::path::PathBuf],
     message_sender: &impl MessageSender,
-) -> Result<Vec<(std::path::PathBuf, FileBackupError)>, Error> {
+) -> Result<Vec<ProcessPathError>, Error> {
     debug_assert!(source_directory_root.is_dir(), "Source is not a dir");
     debug_assert!(
         destination_directory_root.is_dir(),
@@ -269,6 +307,7 @@ async fn backup_all_files(
                 .any(|d| source_file.starts_with(d))
             {
                 // Do not try to copy files for directories that do not exist
+                // TODO: Return error such that we know which files did not get backed up.
                 return Ok(());
             }
             backup_single_file(
@@ -302,7 +341,7 @@ async fn backup_single_file(
     destination_directory_root: &std::path::Path,
     source_file: std::path::PathBuf,
     message_sender: &impl MessageSender,
-) -> Result<(), (std::path::PathBuf, FileBackupError)> {
+) -> Result<(), ProcessPathError> {
     debug_assert!(!source_file.is_dir(), "Must be a file or a symbolic link");
 
     let new_destination_file = get_destination_file_path(
@@ -318,7 +357,7 @@ async fn create_all_directories_in_destination(
     source_directory_root: &std::path::Path,
     destination_directory_root: &std::path::Path,
     message_sender: &impl MessageSender,
-) -> Result<Vec<(std::path::PathBuf, FileBackupError)>, Error> {
+) -> Result<Vec<ProcessPathError>, Error> {
     debug_assert!(source_directory_root.is_dir(), "Source is not a dir");
     debug_assert!(
         destination_directory_root.is_dir(),
@@ -342,6 +381,13 @@ async fn create_all_directories_in_destination(
     while let Some((i, source_directory)) = source_stream.next().await {
         match source_directory {
             Ok(source_directory) => {
+                if errors.iter().any(|e: &ProcessPathError| {
+                    e.not_processed
+                        .as_ref()
+                        .is_some_and(|p| source_directory.starts_with(p))
+                }) {
+                    continue;
+                }
                 if let Err(err) = create_single_directory_if_not_exists(
                     source_directory_root,
                     destination_directory_root,
@@ -374,7 +420,7 @@ async fn create_single_directory_if_not_exists(
     destination_directory_root: &std::path::Path,
     source_directory: std::path::PathBuf,
     message_sender: &impl MessageSender,
-) -> Result<(), (std::path::PathBuf, FileBackupError)> {
+) -> Result<(), ProcessPathError> {
     debug_assert!(source_directory.is_dir(), "Must be a directory");
     let new_destination_dir = get_destination_file_path(
         destination_directory_root,
@@ -391,10 +437,12 @@ async fn create_single_directory_if_not_exists(
             }));
             Ok(())
         } else {
-            Err((
-                source_directory,
-                FileBackupError::DestinationForSourceDirExistsAsFile(new_destination_dir),
-            ))
+            Err(ProcessPathError {
+                not_processed: Some(source_directory.clone()),
+                kind: FileBackupErrorKind::DestinationForSourceDirExistsAsFile {
+                    destination: new_destination_dir,
+                },
+            })
         }
     } else {
         message_sender.send(Message::Info(Info::DirCreated {
@@ -403,14 +451,12 @@ async fn create_single_directory_if_not_exists(
         }));
         tokio::fs::create_dir(&new_destination_dir)
             .await
-            .map_err(|e| {
-                (
-                    source_directory.clone(),
-                    FileBackupError::CannotCreateDestinationDir(
-                        new_destination_dir.clone(),
-                        e.to_string(),
-                    ),
-                )
+            .map_err(|e| ProcessPathError {
+                not_processed: Some(source_directory.clone()),
+                kind: FileBackupErrorKind::CannotCreateDestinationDir {
+                    destination: new_destination_dir.clone(),
+                    io_error: e.to_string(),
+                },
             })
             .inspect(|_| {
                 message_sender.send(Message::Info(Info::DirCreated {
@@ -571,7 +617,7 @@ async fn copy_or_skip_if_same(
     source_file: &std::path::Path,
     destination_file: &std::path::Path,
     message_sender: &impl MessageSender,
-) -> Result<(), (std::path::PathBuf, FileBackupError)> {
+) -> Result<(), ProcessPathError> {
     debug_assert!(
         !source_file.is_dir(),
         "Source file must not be a directory."
@@ -603,11 +649,12 @@ async fn copy_or_skip_if_same(
     }));
     tokio::fs::copy(source_file, destination_file)
         .await
-        .map_err(|e| {
-            (
-                source_file.to_owned(),
-                FileBackupError::CannotCopyFile(destination_file.to_owned(), e.to_string()),
-            )
+        .map_err(|e| ProcessPathError {
+            not_processed: Some(source_file.to_owned()),
+            kind: FileBackupErrorKind::CannotCopyFile {
+                to: destination_file.to_owned(),
+                io_error: e.to_string(),
+            },
         })
         .inspect(|_| {
             message_sender.send(Message::Info(Info::FileCopied {
@@ -652,7 +699,7 @@ async fn set_modified_time(
 async fn get_paths_in_destinatination_but_not_in_source(
     recurse_source: RecursiveReadDir,
     recurse_destination: RecursiveReadDir,
-) -> Result<Vec<std::path::PathBuf>, (std::path::PathBuf, FileBackupError)> {
+) -> Result<Vec<std::path::PathBuf>, ProcessPathError> {
     let source_root_path = recurse_source.root_directory().to_owned();
     let source_root_path = &source_root_path;
     let destination_root_path = recurse_destination.root_directory().to_owned();
@@ -662,39 +709,39 @@ async fn get_paths_in_destinatination_but_not_in_source(
         .and_then(async |path| {
             path.strip_prefix(source_root_path)
                 .map(|p| p.to_owned())
-                .map_err(|e| {
-                    (
-                        path.clone(),
-                        FileBackupError::InvariantBroken(InvariantError::CannotStripPrefixOfPath(
-                            source_root_path.to_owned(),
-                            path.clone(),
-                            e,
-                        )),
-                    )
+                .map_err(|e| ProcessPathError {
+                    not_processed: Some(path.clone()),
+                    kind: FileBackupErrorKind::InvariantBroken(
+                        InvariantError::CannotStripPrefixOfPath {
+                            path_root: source_root_path.to_owned(),
+                            path: path.clone(),
+                            error: e,
+                        },
+                    ),
                 })
         })
         .try_collect()
         .await?;
+
     let destination_files: std::collections::HashSet<_> =
         futures::stream::iter(recurse_destination)
             .and_then(async |path| {
                 path.strip_prefix(destination_root_path)
                     .map(|p| p.to_owned())
-                    .map_err(|e| {
-                        (
-                            path.to_owned(),
-                            FileBackupError::InvariantBroken(
-                                InvariantError::CannotStripPrefixOfPath(
-                                    destination_root_path.clone(),
-                                    path.clone(),
-                                    e,
-                                ),
-                            ),
-                        )
+                    .map_err(|e| ProcessPathError {
+                        not_processed: Some(path.to_owned()),
+                        kind: FileBackupErrorKind::InvariantBroken(
+                            InvariantError::CannotStripPrefixOfPath {
+                                path_root: destination_root_path.clone(),
+                                path: path.clone(),
+                                error: e,
+                            },
+                        ),
                     })
             })
             .try_collect()
             .await?;
+
     let mut res: Vec<_> = (&destination_files - &source_files)
         .iter()
         .map(|p| [destination_root_path, p].iter().collect())
@@ -716,10 +763,9 @@ fn validate_or_create_root_paths<P: AsRef<std::path::Path>>(
         ));
     }
     if !destination_directory_root.exists() {
-        message_sender
-            .send(Message::Info(Info::CreatingDestinationDir(
-                destination_directory_root.to_owned(),
-            )));
+        message_sender.send(Message::Info(Info::CreatingDestinationDir(
+            destination_directory_root.to_owned(),
+        )));
         std::fs::create_dir_all(destination_directory_root)
             .map_err(|e| {
                 Error::CannotCreateRootDestinationDir(
@@ -728,10 +774,9 @@ fn validate_or_create_root_paths<P: AsRef<std::path::Path>>(
                 )
             })
             .inspect(|_| {
-                message_sender
-                    .send(Message::Info(Info::DestinationDirCreated(
-                        destination_directory_root.to_owned(),
-                    )));
+                message_sender.send(Message::Info(Info::DestinationDirCreated(
+                    destination_directory_root.to_owned(),
+                )));
             })?;
     }
     if !destination_directory_root.is_dir() {
@@ -755,13 +800,15 @@ async fn backup<P: AsRef<std::path::Path>>(
         message_sender,
     )
     .await?;
-    let non_exsting_destination_directories: Vec<_> =
-        errors.iter().map(|(p, _)| p.as_path()).collect();
+    let non_exsting_destination_directories: Vec<_> = errors
+        .iter()
+        .filter_map(|e| e.not_processed.as_ref())
+        .collect();
 
     let mut file_backup_errors = backup_all_files(
         source_directory_root,
         destination_directory_root,
-        non_exsting_destination_directories.as_slice(),
+        &non_exsting_destination_directories,
         message_sender,
     )
     .await?;
@@ -836,13 +883,17 @@ fn get_destination_file_path(
     destination_root: &std::path::Path,
     source_root: &std::path::Path,
     source_path: &std::path::Path,
-) -> Result<std::path::PathBuf, (std::path::PathBuf, FileBackupError)> {
-    let path_end = source_path.strip_prefix(source_root).map_err(|e| {
-        (
-            source_path.to_owned(),
-            FileBackupError::CouldNotGenerateDestinationPath(e),
-        )
-    })?;
+) -> Result<std::path::PathBuf, ProcessPathError> {
+    let path_end = source_path
+        .strip_prefix(source_root)
+        .map_err(|e| ProcessPathError {
+            not_processed: Some(source_path.to_owned()),
+            kind: FileBackupErrorKind::InvariantBroken(InvariantError::CannotStripPrefixOfPath {
+                path_root: source_root.to_owned(),
+                path: source_path.to_owned(),
+                error: e,
+            }),
+        })?;
 
     Ok([destination_root, path_end].iter().collect())
 }
@@ -890,7 +941,12 @@ async fn purge_files_and_dirs_in_destination<P: AsRef<std::path::Path>>(
         message_sender.send(Message::Info(Info::StartDeletingDir(dir.clone())));
 
         if let Err(e) = tokio::fs::remove_dir_all(&dir).await {
-            let error = (dir, FileBackupError::CannotDeleteDirectory(e.to_string()));
+            let error = ProcessPathError {
+                not_processed: Some(dir),
+                kind: FileBackupErrorKind::CannotDeleteDirectory {
+                    io_error: e.to_string(),
+                },
+            };
             errors.push(error.clone());
             // NOTE: Early feedback
             message_sender.send(Message::Error(Error::FileBackupErrors(vec![error])));
@@ -926,11 +982,11 @@ async fn purge_files_and_dirs_in_destination<P: AsRef<std::path::Path>>(
             message_sender.send(Message::Info(Info::StartDeletingFile(file.clone())));
             tokio::fs::remove_file(&file)
                 .await
-                .map_err(|e| {
-                    (
-                        file.to_owned(),
-                        FileBackupError::CannotDeleteFile(e.to_string()),
-                    )
+                .map_err(|e| ProcessPathError {
+                    not_processed: Some(file.to_owned()),
+                    kind: FileBackupErrorKind::CannotDeleteFile {
+                        io_error: e.to_string(),
+                    },
                 })
                 .inspect_err(|e| {
                     // NOTE: Early feedback
