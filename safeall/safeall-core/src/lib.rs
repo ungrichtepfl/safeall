@@ -546,37 +546,65 @@ impl std::fmt::Display for Progress {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Progress::Start(total, progress_type) => match progress_type {
-                ProgressType::CreatingDirectories => todo!(),
-                ProgressType::CopingFiles => todo!(),
-                ProgressType::DeletingDirs => todo!(),
-                ProgressType::DeletingFiles => todo!(),
+                ProgressType::CreatingDirectories => {
+                    write!(f, "Start creating {total} directories.")
+                }
+                ProgressType::CopingFiles => write!(f, "Start coping {total} files."),
+                ProgressType::DeletingDirs => write!(f, "Start deleting {total} directories."),
+                ProgressType::DeletingFiles => write!(f, "Start deleting {total} files."),
             },
             Progress::End(progress_type) => match progress_type {
-                ProgressType::CreatingDirectories => todo!(),
-                ProgressType::CopingFiles => todo!(),
-                ProgressType::DeletingDirs => todo!(),
-                ProgressType::DeletingFiles => todo!(),
+                ProgressType::CreatingDirectories => write!(f, "Finished creating directories."),
+                ProgressType::CopingFiles => write!(f, "Finished coping files."),
+                ProgressType::DeletingDirs => write!(f, "Finished deleting directories."),
+                ProgressType::DeletingFiles => write!(f, "Finished deleting files."),
             },
             Progress::Increment(increment) => match increment {
                 Increment::SkippingFileNoModification {
                     source,
                     destination,
-                } => todo!(),
+                } => write!(
+                    f,
+                    "Not coping \"{}\" because \"{}\" is up to date.",
+                    source.display(),
+                    destination.display()
+                ),
                 Increment::FileCopied {
                     source,
                     destination,
-                } => todo!(),
+                } => write!(
+                    f,
+                    "Copied \"{}\" to \"{}\".",
+                    source.display(),
+                    destination.display()
+                ),
                 Increment::DirCreated {
                     source,
                     destination,
-                } => todo!(),
+                } => write!(
+                    f,
+                    "Created directory \"{}\" to backup \"{}\".",
+                    destination.display(),
+                    source.display()
+                ),
                 Increment::DestinationDirAlreadyExists {
                     source,
                     destination,
-                } => todo!(),
-                Increment::DeletedFile(path_buf) => todo!(),
-                Increment::DeletedDir(path_buf) => todo!(),
-                Increment::DirectoryAlreadyDeleted(path_buf) => todo!(),
+                } => write!(
+                    f,
+                    "Directory \"{}\" already exists for backing up \"{}\".",
+                    destination.display(),
+                    source.display()
+                ),
+                Increment::DeletedFile(path) => write!(f, "Deleted file \"{}\".", path.display()),
+                Increment::DeletedDir(path) => {
+                    write!(f, "Deleted directory \"{}\".", path.display())
+                }
+                Increment::DirectoryAlreadyDeleted(path) => write!(
+                    f,
+                    "Directory \"{}\" has already been deleted.",
+                    path.display()
+                ),
             },
         }
     }
@@ -601,18 +629,36 @@ pub enum Info {
 impl std::fmt::Display for Info {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Info::CreatingDestinationDir(path) => todo!(),
-            Info::DestinationDirCreated(path) => todo!(),
+            Info::CreatingDestinationDir(path) => {
+                write!(f, "Creating directory \"{}\".", path.display())
+            }
+            Info::DestinationDirCreated(path) => {
+                write!(f, "Directory \"{}\" created.", path.display())
+            }
             Info::StartCopingFile {
                 source,
                 destination,
-            } => todo!(),
-            Info::StartDeletingDir(path) => todo!(),
-            Info::StartDeletingFile(path) => todo!(),
+            } => write!(
+                f,
+                "Start coping file \"{}\" to \"{}\".",
+                source.display(),
+                destination.display()
+            ),
+            Info::StartDeletingDir(path) => {
+                write!(f, "Start deleting directory \"{}\".", path.display())
+            }
+            Info::StartDeletingFile(path) => {
+                write!(f, "Start deleting file \"{}\".", path.display())
+            }
             Info::StartCreatingDir {
                 source,
                 destination,
-            } => todo!(),
+            } => write!(
+                f,
+                "Start creating \"{}\" for \"{}\"",
+                destination.display(),
+                source.display()
+            ),
         }
     }
 }
@@ -642,16 +688,46 @@ impl std::fmt::Display for Warning {
                 source,
                 destination,
                 copy_anyway,
-            } => todo!(),
+            } => {
+                let copy = if *copy_anyway {
+                    " We try to copy the file anyway."
+                } else {
+                    " We do not try to copy the file."
+                };
+
+                write!(
+                    f,
+                    "Cannot get meta data for either \"{}\" or \"{}\".{copy}",
+                    source.display(),
+                    destination.display()
+                )
+            }
             Warning::CannotGetHash {
                 source,
                 destination,
                 copy_anyway,
-            } => todo!(),
+            } => {
+                let copy = if *copy_anyway {
+                    " We try to copy the file anyway."
+                } else {
+                    " We do not try to copy the file."
+                };
+                write!(
+                    f,
+                    "Cannot get the hash for \"{}\" or \"{}\".{copy}",
+                    source.display(),
+                    destination.display()
+                )
+            }
             Warning::CannotCopyModifiedTime {
                 source,
                 destination,
-            } => todo!(),
+            } => write!(
+                f,
+                "Cannot copy the modification time from \"{}\" to \"{}\".",
+                source.display(),
+                destination.display()
+            ),
         }
     }
 }

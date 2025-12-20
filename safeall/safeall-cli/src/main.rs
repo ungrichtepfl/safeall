@@ -14,6 +14,8 @@ const STYLES: clap::builder::styling::Styles = clap::builder::styling::Styles::s
 struct CliArgs {
     #[command(subcommand)]
     command: Commands,
+    #[arg(short, long)]
+    verbose: bool,
 }
 
 #[derive(clap::Subcommand)]
@@ -76,34 +78,6 @@ impl From<Commands> for safeall::Command {
     }
 }
 
-#[derive(Debug)]
-enum Error {
-    Core(safeall::Error),
-    Tokio(tokio::task::JoinError),
-}
-
-impl std::error::Error for Error {}
-
-impl From<tokio::task::JoinError> for Error {
-    fn from(value: tokio::task::JoinError) -> Self {
-        Self::Tokio(value)
-    }
-}
-impl From<safeall::Error> for Error {
-    fn from(value: safeall::Error) -> Self {
-        Self::Core(value)
-    }
-}
-
-impl std::fmt::Display for Error {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Core(e) => e.fmt(f),
-            Self::Tokio(e) => e.fmt(f),
-        }
-    }
-}
-
 struct CliMessageSender(tokio::sync::mpsc::UnboundedSender<safeall::Message>);
 
 impl safeall::MessageSender for CliMessageSender {
@@ -121,12 +95,6 @@ struct CliOutput {
 enum Verbosity {
     Normal,
     Verbose,
-}
-
-impl Default for Verbosity {
-    fn default() -> Self {
-        Verbosity::Normal
-    }
 }
 
 impl CliOutput {
@@ -172,6 +140,9 @@ impl CliOutput {
                             progress_bar.abandon_with_message(format!("{}", progress));
                         }
                         self.progress_bar = None;
+                        while let Some(warning) = self.warnings.pop() {
+                            eprintln!("{}", console::style(format!("WARNING: {warning}")).yellow());
+                        }
                     }
                 },
             },
@@ -180,7 +151,7 @@ impl CliOutput {
                     eprintln!("{}", console::style(format!("WARNING: {warning}")).yellow());
                 }
                 M::Info(info) => {
-                    println!("{}", console::style(format!("INFO: {info}")).green());
+                    println!("{}", console::style(format!("INFO: {info}")));
                 }
                 M::Error(error) => {
                     eprintln!("{}", console::style(format!("ERROR: {error}")).red());
@@ -202,28 +173,52 @@ impl CliOutput {
     }
 }
 
-async fn cli() -> Result<(), Error> {
+async fn cli() -> bool {
     let cli_args = CliArgs::parse();
+    let verbosity = if cli_args.verbose {
+        Verbosity::Verbose
+    } else {
+        Verbosity::Normal
+    };
     let (message_sender, mut message_receiver) = tokio::sync::mpsc::unbounded_channel();
     let message_sender = CliMessageSender(message_sender);
     let run =
         tokio::spawn(async move { safeall::run(cli_args.command.into(), message_sender).await });
 
-    let mut cli_output = CliOutput::new(Verbosity::default());
+    let mut cli_output = CliOutput::new(verbosity);
 
     while let Some(message) = message_receiver.recv().await {
         cli_output.process_message(message);
     }
 
-    let res = run.await?;
-    res?;
-    Ok(())
+    match run.await {
+        Ok(result) => {
+            if let Err(error) = result {
+                match error {
+                    safeall::Error::FileBackupErrors(process_path_errors) => {
+                        for error in process_path_errors {
+                            eprintln!("{}", console::style(format!("ERROR: {error}")).red())
+                        }
+                    }
+                    _ => eprintln!("{}", console::style(format!("ERROR: {error}")).red()),
+                }
+                return false;
+            }
+        }
+        Err(error) => {
+            eprintln!(
+                "{}",
+                console::style(format!("ERROR: Could execute command: {error}")).red()
+            );
+            return false;
+        }
+    }
+    true
 }
 
 #[tokio::main(flavor = "multi_thread")]
 async fn main() -> std::process::ExitCode {
-    if let Err(e) = cli().await {
-        println!("ERROR: {e}");
+    if !cli().await {
         return std::process::ExitCode::FAILURE;
     }
     std::process::ExitCode::SUCCESS
