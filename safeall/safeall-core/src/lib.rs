@@ -294,11 +294,14 @@ async fn backup_all_files(
 
     use futures::stream::StreamExt;
     let num_files = futures::stream::iter(source_recurse_files).count().await;
+    message_sender.send(Message::Progress(Progress::Start(
+        num_files,
+        ProgressType::CopingFiles,
+    )));
     let source_recurse_files =
         RecursiveReadDir::try_new(source_directory_root, ReadDirType::FilesOnly).map_err(|e| {
             Error::CannotReadDirectoryContent(source_directory_root.to_owned(), e.to_string())
         })?;
-    let done = std::sync::atomic::AtomicUsize::new(1);
     let errors: Vec<_> = futures::stream::iter(source_recurse_files)
         .map(async |source_file| {
             let source_file = source_file?;
@@ -317,22 +320,12 @@ async fn backup_all_files(
                 message_sender,
             )
             .await
-            .inspect_err(|e| {
-                // NOTE: Early feedback
-                message_sender.send(Message::Error(Error::FileBackupErrors(vec![e.clone()])));
-            })
-            .inspect(|_| {
-                message_sender.send(Message::Progress {
-                    progress: Progress::CopyFiles,
-                    done: done.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
-                    total: num_files,
-                });
-            })
         })
         .buffer_unordered(cpu_count())
         .filter_map(async move |res| res.err())
         .collect()
         .await;
+    message_sender.send(Message::Progress(Progress::End(ProgressType::CopingFiles)));
     Ok(errors)
 }
 
@@ -368,17 +361,22 @@ async fn create_all_directories_in_destination(
             |e| Error::CannotReadDirectoryContent(source_directory_root.to_owned(), e.to_string()),
         )?;
 
-    let mut errors = vec![];
     use futures::StreamExt;
     let num_dirs = futures::stream::iter(source_recurse_directories)
         .count()
         .await;
+    message_sender.send(Message::Progress(Progress::Start(
+        num_dirs,
+        ProgressType::CreatingDirectories,
+    )));
+
     let source_recurse_directories =
         RecursiveReadDir::try_new(source_directory_root, ReadDirType::DirectoriesOnly).map_err(
             |e| Error::CannotReadDirectoryContent(source_directory_root.to_owned(), e.to_string()),
         )?;
-    let mut source_stream = futures::stream::iter(source_recurse_directories).enumerate();
-    while let Some((i, source_directory)) = source_stream.next().await {
+    let mut source_stream = futures::stream::iter(source_recurse_directories);
+    let mut errors = vec![];
+    while let Some(source_directory) = source_stream.next().await {
         match source_directory {
             Ok(source_directory) => {
                 if errors.iter().any(|e: &ProcessPathError| {
@@ -395,23 +393,16 @@ async fn create_all_directories_in_destination(
                     message_sender,
                 )
                 .await
-                .inspect_err(|e| {
-                    // NOTE: Early feedback
-                    message_sender.send(Message::Error(Error::FileBackupErrors(vec![e.clone()])));
-                })
-                .inspect(|_| {
-                    message_sender.send(Message::Progress {
-                        progress: Progress::CreateDir,
-                        done: i,
-                        total: num_dirs,
-                    });
-                }) {
+                {
                     errors.push(err);
                 }
             }
             Err(err) => errors.push(err),
         }
     }
+    message_sender.send(Message::Progress(Progress::End(
+        ProgressType::CreatingDirectories,
+    )));
     Ok(errors)
 }
 
@@ -431,10 +422,12 @@ async fn create_single_directory_if_not_exists(
     if new_destination_dir.exists() {
         // If it already exists it must be a directory too
         if new_destination_dir.is_dir() {
-            message_sender.send(Message::Info(Info::DestinationDirAlreadyExists {
-                source: source_directory.clone(),
-                destination: new_destination_dir.clone(),
-            }));
+            message_sender.send(Message::Progress(Progress::Increment(
+                Increment::DestinationDirAlreadyExists {
+                    source: source_directory.clone(),
+                    destination: new_destination_dir.clone(),
+                },
+            )));
             Ok(())
         } else {
             Err(ProcessPathError {
@@ -445,7 +438,7 @@ async fn create_single_directory_if_not_exists(
             })
         }
     } else {
-        message_sender.send(Message::Info(Info::DirCreated {
+        message_sender.send(Message::Info(Info::StartCreatingDir {
             source: source_directory.clone(),
             destination: new_destination_dir.clone(),
         }));
@@ -459,10 +452,12 @@ async fn create_single_directory_if_not_exists(
                 },
             })
             .inspect(|_| {
-                message_sender.send(Message::Info(Info::DirCreated {
-                    source: source_directory,
-                    destination: new_destination_dir,
-                }));
+                message_sender.send(Message::Progress(Progress::Increment(
+                    Increment::DirCreated {
+                        source: source_directory,
+                        destination: new_destination_dir,
+                    },
+                )));
             })
     }
 }
@@ -502,24 +497,23 @@ async fn get_hash(path: &std::path::Path) -> Option<blake3::Hash> {
 }
 
 #[derive(Debug)]
-pub enum Progress {
-    CopyFiles,
-    DeleteFiles,
-    DeleteDirs,
-    CreateDir,
+pub enum ProgressType {
+    CreatingDirectories,
+    CopingFiles,
+    DeletingDirs,
+    DeletingFiles,
 }
 
 #[derive(Debug)]
-pub enum Info {
+pub enum Increment {
     SkippingFileNoModification {
         source: std::path::PathBuf,
         destination: std::path::PathBuf,
     },
-    StartCopingFile {
+    FileCopied {
         source: std::path::PathBuf,
         destination: std::path::PathBuf,
     },
-    DestinationDirCreated(std::path::PathBuf),
     DirCreated {
         source: std::path::PathBuf,
         destination: std::path::PathBuf,
@@ -528,15 +522,99 @@ pub enum Info {
         source: std::path::PathBuf,
         destination: std::path::PathBuf,
     },
-    CreatingDestinationDir(std::path::PathBuf),
+    DeletedFile(std::path::PathBuf),
+    DeletedDir(std::path::PathBuf),
+    DirectoryAlreadyDeleted(std::path::PathBuf),
+}
+
+#[derive(Debug)]
+pub enum ProgressEnd {
     FileCopied {
+        source: std::path::PathBuf,
+        destination: std::path::PathBuf,
+    },
+}
+
+#[derive(Debug)]
+pub enum Progress {
+    Start(usize, ProgressType),
+    Increment(Increment),
+    End(ProgressType),
+}
+
+impl std::fmt::Display for Progress {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Progress::Start(total, progress_type) => match progress_type {
+                ProgressType::CreatingDirectories => todo!(),
+                ProgressType::CopingFiles => todo!(),
+                ProgressType::DeletingDirs => todo!(),
+                ProgressType::DeletingFiles => todo!(),
+            },
+            Progress::End(progress_type) => match progress_type {
+                ProgressType::CreatingDirectories => todo!(),
+                ProgressType::CopingFiles => todo!(),
+                ProgressType::DeletingDirs => todo!(),
+                ProgressType::DeletingFiles => todo!(),
+            },
+            Progress::Increment(increment) => match increment {
+                Increment::SkippingFileNoModification {
+                    source,
+                    destination,
+                } => todo!(),
+                Increment::FileCopied {
+                    source,
+                    destination,
+                } => todo!(),
+                Increment::DirCreated {
+                    source,
+                    destination,
+                } => todo!(),
+                Increment::DestinationDirAlreadyExists {
+                    source,
+                    destination,
+                } => todo!(),
+                Increment::DeletedFile(path_buf) => todo!(),
+                Increment::DeletedDir(path_buf) => todo!(),
+                Increment::DirectoryAlreadyDeleted(path_buf) => todo!(),
+            },
+        }
+    }
+}
+
+#[derive(Debug)]
+pub enum Info {
+    CreatingDestinationDir(std::path::PathBuf),
+    DestinationDirCreated(std::path::PathBuf),
+    StartCopingFile {
         source: std::path::PathBuf,
         destination: std::path::PathBuf,
     },
     StartDeletingDir(std::path::PathBuf),
     StartDeletingFile(std::path::PathBuf),
-    DeletedFile(std::path::PathBuf),
-    DeletedDir(std::path::PathBuf),
+    StartCreatingDir {
+        source: std::path::PathBuf,
+        destination: std::path::PathBuf,
+    },
+}
+
+impl std::fmt::Display for Info {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Info::CreatingDestinationDir(path) => todo!(),
+            Info::DestinationDirCreated(path) => todo!(),
+            Info::StartCopingFile {
+                source,
+                destination,
+            } => todo!(),
+            Info::StartDeletingDir(path) => todo!(),
+            Info::StartDeletingFile(path) => todo!(),
+            Info::StartCreatingDir {
+                source,
+                destination,
+            } => todo!(),
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -557,17 +635,34 @@ pub enum Warning {
     },
 }
 
+impl std::fmt::Display for Warning {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Warning::CannotGetMetadata {
+                source,
+                destination,
+                copy_anyway,
+            } => todo!(),
+            Warning::CannotGetHash {
+                source,
+                destination,
+                copy_anyway,
+            } => todo!(),
+            Warning::CannotCopyModifiedTime {
+                source,
+                destination,
+            } => todo!(),
+        }
+    }
+}
+
 #[derive(Debug)]
 pub enum Message {
     // TODO: Maybe we should send the errors here?
     Warning(Warning),
     Info(Info),
-    Progress {
-        progress: Progress,
-        done: usize,
-        total: usize,
-    },
-    Error(Error),
+    Progress(Progress),
+    Error(ProcessPathError),
 }
 
 async fn skip_copy(
@@ -636,10 +731,12 @@ async fn copy_or_skip_if_same(
     )
     .await
     {
-        message_sender.send(Message::Info(Info::SkippingFileNoModification {
-            source: source_file.to_owned(),
-            destination: destination_file.to_owned(),
-        }));
+        message_sender.send(Message::Progress(Progress::Increment(
+            Increment::SkippingFileNoModification {
+                source: source_file.to_owned(),
+                destination: destination_file.to_owned(),
+            },
+        )));
         return Ok(());
     }
 
@@ -657,10 +754,12 @@ async fn copy_or_skip_if_same(
             },
         })
         .inspect(|_| {
-            message_sender.send(Message::Info(Info::FileCopied {
-                source: source_file.to_owned(),
-                destination: destination_file.to_owned(),
-            }));
+            message_sender.send(Message::Progress(Progress::Increment(
+                Increment::FileCopied {
+                    source: source_file.to_owned(),
+                    destination: destination_file.to_owned(),
+                },
+            )));
         })?;
 
     if set_modified_time(&source_metadata, destination_file)
@@ -923,23 +1022,23 @@ async fn purge_files_and_dirs_in_destination<P: AsRef<std::path::Path>>(
     .await
     .map_err(|e| Error::FileBackupErrors(vec![e]))?;
 
+    let num_dirs = futures::stream::iter(dirs_to_delete.clone()).count().await;
+    message_sender.send(Message::Progress(Progress::Start(
+        num_dirs,
+        ProgressType::DeletingDirs,
+    )));
+
     let mut errors = vec![];
     let mut deleted_dirs = vec![];
-    let num_dirs = futures::stream::iter(dirs_to_delete.clone()).count().await;
     let mut dir_stream = futures::stream::iter(dirs_to_delete);
-    let mut done = 0;
     while let Some(dir) = dir_stream.next().await {
         if deleted_dirs.iter().any(|d| dir.starts_with(d)) {
-            done += 1;
-            message_sender.send(Message::Progress {
-                progress: Progress::DeleteDirs,
-                done,
-                total: num_dirs,
-            });
+            message_sender.send(Message::Progress(Progress::Increment(
+                Increment::DirectoryAlreadyDeleted(dir),
+            )));
             continue;
         }
         message_sender.send(Message::Info(Info::StartDeletingDir(dir.clone())));
-
         if let Err(e) = tokio::fs::remove_dir_all(&dir).await {
             let error = ProcessPathError {
                 not_processed: Some(dir),
@@ -948,19 +1047,14 @@ async fn purge_files_and_dirs_in_destination<P: AsRef<std::path::Path>>(
                 },
             };
             errors.push(error.clone());
-            // NOTE: Early feedback
-            message_sender.send(Message::Error(Error::FileBackupErrors(vec![error])));
         } else {
-            done += 1;
-            message_sender.send(Message::Info(Info::DeletedDir(dir.clone())));
-            message_sender.send(Message::Progress {
-                progress: Progress::DeleteDirs,
-                done,
-                total: num_dirs,
-            });
+            message_sender.send(Message::Progress(Progress::Increment(
+                Increment::DeletedDir(dir.clone()),
+            )));
             deleted_dirs.push(dir);
         }
     }
+    message_sender.send(Message::Progress(Progress::End(ProgressType::DeletingDirs)));
 
     let source_recurse_files = RecursiveReadDir::try_new(source_root, ReadDirType::FilesOnly)
         .map_err(|e| Error::CannotReadDirectoryContent(source_root.to_owned(), e.to_string()))?;
@@ -975,8 +1069,12 @@ async fn purge_files_and_dirs_in_destination<P: AsRef<std::path::Path>>(
     )
     .await
     .map_err(|e| Error::FileBackupErrors(vec![e]))?;
-    let done = std::sync::atomic::AtomicUsize::new(1);
     let num_files = futures::stream::iter(files_to_delete.clone()).count().await;
+    message_sender.send(Message::Progress(Progress::Start(
+        num_files,
+        ProgressType::DeletingFiles,
+    )));
+
     let mut errors_file: Vec<_> = futures::stream::iter(files_to_delete)
         .map(async |file| {
             message_sender.send(Message::Info(Info::StartDeletingFile(file.clone())));
@@ -988,23 +1086,19 @@ async fn purge_files_and_dirs_in_destination<P: AsRef<std::path::Path>>(
                         io_error: e.to_string(),
                     },
                 })
-                .inspect_err(|e| {
-                    // NOTE: Early feedback
-                    message_sender.send(Message::Error(Error::FileBackupErrors(vec![e.clone()])));
-                })
                 .inspect(|_| {
-                    message_sender.send(Message::Info(Info::DeletedFile(file.clone())));
-                    message_sender.send(Message::Progress {
-                        progress: Progress::DeleteFiles,
-                        done: done.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
-                        total: num_files,
-                    });
+                    message_sender.send(Message::Progress(Progress::Increment(
+                        Increment::DeletedFile(file),
+                    )));
                 })
         })
         .buffer_unordered(cpu_count())
         .filter_map(async move |res| res.err())
         .collect()
         .await;
+    message_sender.send(Message::Progress(Progress::End(
+        ProgressType::DeletingFiles,
+    )));
 
     if !errors.is_empty() || !errors_file.is_empty() {
         errors.append(&mut errors_file);
