@@ -7,7 +7,7 @@ edition = "2024"
 [dependencies]
 safeall-core.workspace = true
 
-iced = { version = "0.14.0", features = ["tokio"] }
+iced = { version = "0.14.0", features = ["tokio", "sipper"] }
 tokio.workspace = true
 
 [lints.clippy]

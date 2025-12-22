@@ -3,11 +3,25 @@ enum Message {
     StartBackup,
     StartSync,
     StartRestore,
-    Finished(bool),
+    BackupUpdate(safeall::Message),
+    BackupFinished(Result<(), safeall::Error>),
 }
 
 #[derive(Default)]
-struct Gui {}
+enum BackupState {
+    #[default]
+    Idle,
+    Running {
+        _task: iced::task::Handle,
+    },
+    Success,
+    Error,
+}
+
+#[derive(Default)]
+struct Gui {
+    backup_state: BackupState,
+}
 
 impl Gui {
     fn view(&self) -> iced::widget::Column<'_, Message> {
@@ -20,21 +34,22 @@ impl Gui {
     }
     fn update(&mut self, message: Message) -> iced::Task<Message> {
         match message {
-            Message::StartBackup => iced::Task::perform(Gui::start_backup(), Message::Finished),
-            Message::Finished(success) => {
-                if !success {
-                    eprintln!("Fail");
-                } else {
-                    println!("Success");
-                }
-                iced::Task::none()
-            }
+            Message::StartBackup => self.start_backup(safeall::Command::Backup {
+                source_root: std::path::PathBuf::from("out"),
+                destination_root: std::path::PathBuf::from("target"),
+            }),
             Message::StartSync => {
-                println!("Sync");
-                iced::Task::none()
+                todo!();
             }
             Message::StartRestore => {
-                println!("Sync");
+                todo!();
+            }
+            Message::BackupUpdate(message) => {
+                println!("{message:?}");
+                iced::Task::none()
+            }
+            Message::BackupFinished(result) => {
+                println!("{result:?}");
                 iced::Task::none()
             }
         }
@@ -42,9 +57,35 @@ impl Gui {
     fn theme(&self) -> iced::Theme {
         iced::Theme::Light
     }
-    async fn start_backup() -> bool {
-        std::thread::sleep(std::time::Duration::from_secs(10));
-        false
+
+    fn start_backup(&mut self, command: safeall::Command) -> iced::Task<Message> {
+        let (task, handle) = iced::Task::sip(
+            iced::task::sipper(async move |mut iced_sender| {
+                let (message_sender, mut message_receiver) = tokio::sync::mpsc::unbounded_channel();
+                let run = tokio::spawn(async move { safeall::run(command, message_sender).await });
+
+                while let Some(message) = message_receiver.recv().await {
+                    iced_sender.send(message).await;
+                }
+
+                match run.await {
+                    Ok(result) => {
+                        return result;
+                    }
+                    Err(error) => {}
+                }
+                Ok(())
+            }),
+            Message::BackupUpdate,
+            Message::BackupFinished,
+        )
+        .abortable();
+
+        self.backup_state = BackupState::Running {
+            _task: handle.abort_on_drop(),
+        };
+
+        task
     }
 }
 

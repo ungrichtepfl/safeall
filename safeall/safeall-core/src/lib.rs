@@ -28,6 +28,12 @@ pub trait MessageSender {
     fn send(&self, message: Message);
 }
 
+impl MessageSender for tokio::sync::mpsc::UnboundedSender<Message> {
+    fn send(&self, message: Message) {
+        self.send(message).ok();
+    }
+}
+
 impl RecursiveReadDir {
     #[must_use]
     pub fn root_directory(&self) -> &std::path::Path {
@@ -554,7 +560,7 @@ async fn get_hash(path: &std::path::Path) -> Option<blake3::Hash> {
     .ok()?
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum ProgressType {
     CreatingDirectories,
     CopingFiles,
@@ -562,7 +568,7 @@ pub enum ProgressType {
     DeletingFiles,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum Increment {
     SkippingFileNoModification {
         source: std::path::PathBuf,
@@ -594,7 +600,7 @@ pub enum ProgressEnd {
     },
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum Progress {
     Start(usize, ProgressType),
     IncrementSuccess(Increment),
@@ -723,7 +729,7 @@ impl std::fmt::Display for Progress {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum Info {
     CreatingDestinationDir(std::path::PathBuf),
     DestinationDirCreated(std::path::PathBuf),
@@ -776,7 +782,7 @@ impl std::fmt::Display for Info {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum Warning {
     CannotGetMetadata {
         source: std::path::PathBuf,
@@ -845,7 +851,7 @@ impl std::fmt::Display for Warning {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum Message {
     Warning(Warning),
     Info(Info),

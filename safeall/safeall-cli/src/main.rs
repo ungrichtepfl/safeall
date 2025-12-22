@@ -78,14 +78,6 @@ impl From<Commands> for safeall::Command {
     }
 }
 
-struct CliMessageSender(tokio::sync::mpsc::UnboundedSender<safeall::Message>);
-
-impl safeall::MessageSender for CliMessageSender {
-    fn send(&self, message: safeall::Message) {
-        self.0.send(message).ok();
-    }
-}
-
 struct CliOutput {
     progress_bar: Option<indicatif::ProgressBar>,
     verbosity: Verbosity,
@@ -274,7 +266,6 @@ async fn cli() -> bool {
         Verbosity::Normal
     };
     let (message_sender, mut message_receiver) = tokio::sync::mpsc::unbounded_channel();
-    let message_sender = CliMessageSender(message_sender);
     let run =
         tokio::spawn(async move { safeall::run(cli_args.command.into(), message_sender).await });
 
