@@ -115,7 +115,7 @@ impl CliOutput {
                     if let Some(ref progress_bar) = self.progress_bar {
                         progress_bar.set_message(format!("{warning}"));
                     }
-                    self.warnings.push(warning)
+                    self.warnings.push(warning);
                 }
                 M::Info(info) => {
                     if let Some(ref progress_bar) = self.progress_bar {
@@ -127,17 +127,17 @@ impl CliOutput {
                 }
                 M::Progress(ref progress) => match progress {
                     P::Start(total, _) => {
-                        self.create_progress_bar(*total, format!("{}", progress));
+                        self.create_progress_bar(*total, format!("{progress}"));
                     }
                     P::Increment(_) => {
                         if let Some(ref progress_bar) = self.progress_bar {
                             progress_bar.inc(1);
-                            progress_bar.set_message(format!("{}", progress));
+                            progress_bar.set_message(format!("{progress}"));
                         }
                     }
                     P::End(_) => {
                         if let Some(ref progress_bar) = self.progress_bar {
-                            progress_bar.abandon_with_message(format!("{}", progress));
+                            progress_bar.abandon_with_message(format!("{progress}"));
                         }
                         self.progress_bar = None;
                         while let Some(warning) = self.warnings.pop() {
@@ -195,9 +195,9 @@ async fn cli() -> bool {
         Ok(result) => {
             if let Err(error) = result {
                 match error {
-                    safeall::Error::FileBackupErrors(process_path_errors) => {
-                        for error in process_path_errors {
-                            eprintln!("{}", console::style(format!("ERROR: {error}")).red())
+                    safeall::Error::ProcessPathErrors { directories, files } => {
+                        for error in directories.iter().chain(&files) {
+                            eprintln!("{}", console::style(format!("ERROR: {error}")).red());
                         }
                     }
                     _ => eprintln!("{}", console::style(format!("ERROR: {error}")).red()),

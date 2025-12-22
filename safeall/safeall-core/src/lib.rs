@@ -1,9 +1,11 @@
+#![allow(clippy::missing_errors_doc)]
+
 pub const MAINTAINER_EMAIL: &str = "christoph.ungricht@outlook.com";
 
 #[inline]
 fn cpu_count() -> usize {
     std::thread::available_parallelism()
-        .map(|n| n.get())
+        .map(std::num::NonZero::get)
         .unwrap_or(1)
 }
 
@@ -27,6 +29,7 @@ pub trait MessageSender {
 }
 
 impl RecursiveReadDir {
+    #[must_use]
     pub fn root_directory(&self) -> &std::path::Path {
         self.for_root.as_ref()
     }
@@ -51,7 +54,7 @@ impl Iterator for RecursiveReadDir {
     type Item = Result<std::path::PathBuf, ProcessPathError>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        use FileBackupErrorKind as K;
+        use ProcessPathErrorKind as K;
         'drain_current_readdir: loop {
             for entry in &mut self.current_readdir {
                 match entry {
@@ -83,7 +86,7 @@ impl Iterator for RecursiveReadDir {
                 match std::fs::read_dir(&next_readdir) {
                     Ok(readdir) => {
                         self.current_readdir = readdir;
-                        self.current_dirpath = next_readdir.clone();
+                        self.current_dirpath.clone_from(&next_readdir);
                         match self.readdir_type {
                             ReadDirType::FilesOnly => continue 'drain_current_readdir,
                             ReadDirType::DirectoriesOnly => {
@@ -147,11 +150,11 @@ impl std::fmt::Display for InvariantError {
 #[derive(Debug, Clone)]
 pub struct ProcessPathError {
     pub not_processed: Option<std::path::PathBuf>,
-    pub kind: FileBackupErrorKind,
+    pub kind: ProcessPathErrorKind,
 }
 
 #[derive(Debug, Clone)]
-pub enum FileBackupErrorKind {
+pub enum ProcessPathErrorKind {
     CannotCreateDestinationDir {
         destination: std::path::PathBuf,
         io_error: String,
@@ -177,13 +180,14 @@ pub enum FileBackupErrorKind {
     CannotDeleteFile {
         io_error: String,
     },
+    CannotCopyFileDirectoyNotExisting,
 }
 
 impl std::error::Error for ProcessPathError {}
 
 impl std::fmt::Display for ProcessPathError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        use FileBackupErrorKind as K;
+        use ProcessPathErrorKind as K;
         let prefix = if let Some(ref not_processed) = self.not_processed {
             format!("Could not process \"{}\". ", not_processed.display())
         } else {
@@ -230,17 +234,35 @@ impl std::fmt::Display for ProcessPathError {
             K::CannotDeleteFile { io_error } => {
                 write!(f, "{prefix}Cannot delete file: {io_error}.")
             }
+            K::CannotCopyFileDirectoyNotExisting => {
+                write!(f, "{prefix}Cannot copy file as directory does not exist.")
+            }
         }
     }
 }
 
 #[derive(Debug, Clone)]
 pub enum Error {
-    FileBackupErrors(Vec<ProcessPathError>),
+    ProcessPathErrors {
+        directories: Vec<ProcessPathError>,
+        files: Vec<ProcessPathError>,
+    },
     SourceRootPathDoesNotExist(std::path::PathBuf),
     CannotReadDirectoryContent(std::path::PathBuf, String),
     CannotCreateRootDestinationDir(std::path::PathBuf, String),
     RootDestinatinIsNotADirectory(std::path::PathBuf),
+}
+
+impl Error {
+    fn from_processing_results(
+        directories: Vec<ProcessPathError>,
+        files: Vec<ProcessPathError>,
+    ) -> Result<(), Self> {
+        if files.is_empty() && directories.is_empty() {
+            return Ok(());
+        }
+        Err(Self::ProcessPathErrors { directories, files })
+    }
 }
 
 impl std::error::Error for Error {}
@@ -248,10 +270,16 @@ impl std::error::Error for Error {}
 impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Error::FileBackupErrors(errors) => errors.iter().enumerate().try_for_each(|(i, e)| {
-                let end = if i == errors.len() - 1 { "" } else { "\n" };
-                write!(f, "{e}{end}")
-            }),
+            Error::ProcessPathErrors { directories, files } => {
+                directories.iter().enumerate().try_for_each(|(i, e)| {
+                    let end = if i == directories.len() - 1 { "" } else { "\n" };
+                    write!(f, "{e}{end}")
+                })?;
+                files.iter().enumerate().try_for_each(|(i, e)| {
+                    let end = if i == files.len() - 1 { "" } else { "\n" };
+                    write!(f, "{e}{end}")
+                })
+            }
             Error::SourceRootPathDoesNotExist(path) => write!(
                 f,
                 "The specified source directory \"{}\" does not exists.",
@@ -279,9 +307,11 @@ impl std::fmt::Display for Error {
 async fn backup_all_files(
     source_directory_root: &std::path::Path,
     destination_directory_root: &std::path::Path,
-    not_existing_destination_directories: &[&std::path::PathBuf],
+    failed_source_directories: &[&std::path::Path],
     message_sender: &impl MessageSender,
 ) -> Result<Vec<ProcessPathError>, Error> {
+    use futures::stream::StreamExt;
+
     debug_assert!(source_directory_root.is_dir(), "Source is not a dir");
     debug_assert!(
         destination_directory_root.is_dir(),
@@ -292,7 +322,6 @@ async fn backup_all_files(
             Error::CannotReadDirectoryContent(source_directory_root.to_owned(), e.to_string())
         })?;
 
-    use futures::stream::StreamExt;
     let num_files = futures::stream::iter(source_recurse_files).count().await;
     message_sender.send(Message::Progress(Progress::Start(
         num_files,
@@ -305,13 +334,15 @@ async fn backup_all_files(
     let errors: Vec<_> = futures::stream::iter(source_recurse_files)
         .map(async |source_file| {
             let source_file = source_file?;
-            if not_existing_destination_directories
+            if failed_source_directories
                 .iter()
                 .any(|d| source_file.starts_with(d))
             {
-                // Do not try to copy files for directories that do not exist
-                // TODO: Return error such that we know which files did not get backed up.
-                return Ok(());
+                // Do not try to copy files for directories that do not exist, fail instantly
+                return Err(ProcessPathError {
+                    not_processed: Some(source_file.clone()),
+                    kind: ProcessPathErrorKind::CannotCopyFileDirectoyNotExisting,
+                });
             }
             backup_single_file(
                 source_directory_root,
@@ -351,6 +382,8 @@ async fn create_all_directories_in_destination(
     destination_directory_root: &std::path::Path,
     message_sender: &impl MessageSender,
 ) -> Result<Vec<ProcessPathError>, Error> {
+    use futures::StreamExt;
+
     debug_assert!(source_directory_root.is_dir(), "Source is not a dir");
     debug_assert!(
         destination_directory_root.is_dir(),
@@ -361,7 +394,6 @@ async fn create_all_directories_in_destination(
             |e| Error::CannotReadDirectoryContent(source_directory_root.to_owned(), e.to_string()),
         )?;
 
-    use futures::StreamExt;
     let num_dirs = futures::stream::iter(source_recurse_directories)
         .count()
         .await;
@@ -432,7 +464,7 @@ async fn create_single_directory_if_not_exists(
         } else {
             Err(ProcessPathError {
                 not_processed: Some(source_directory.clone()),
-                kind: FileBackupErrorKind::DestinationForSourceDirExistsAsFile {
+                kind: ProcessPathErrorKind::DestinationForSourceDirExistsAsFile {
                     destination: new_destination_dir,
                 },
             })
@@ -446,12 +478,12 @@ async fn create_single_directory_if_not_exists(
             .await
             .map_err(|e| ProcessPathError {
                 not_processed: Some(source_directory.clone()),
-                kind: FileBackupErrorKind::CannotCreateDestinationDir {
+                kind: ProcessPathErrorKind::CannotCreateDestinationDir {
                     destination: new_destination_dir.clone(),
                     io_error: e.to_string(),
                 },
             })
-            .inspect(|_| {
+            .inspect(|()| {
                 message_sender.send(Message::Progress(Progress::Increment(
                     Increment::DirCreated {
                         source: source_directory,
@@ -525,6 +557,7 @@ pub enum Increment {
     DeletedFile(std::path::PathBuf),
     DeletedDir(std::path::PathBuf),
     DirectoryAlreadyDeleted(std::path::PathBuf),
+    FileAlreadyDeleted(std::path::PathBuf),
 }
 
 #[derive(Debug)]
@@ -605,6 +638,9 @@ impl std::fmt::Display for Progress {
                     "Directory \"{}\" has already been deleted.",
                     path.display()
                 ),
+                Increment::FileAlreadyDeleted(path) => {
+                    write!(f, "File \"{}\" has already been deleted.", path.display())
+                }
             },
         }
     }
@@ -744,7 +780,7 @@ pub enum Message {
 async fn skip_copy(
     source_file: &std::path::Path,
     destination_file: &std::path::Path,
-    source_metadata: &Option<FileMetaData>,
+    source_metadata: Option<&FileMetaData>,
     message_sender: &impl MessageSender,
 ) -> bool {
     if !destination_file.exists() {
@@ -762,7 +798,7 @@ async fn skip_copy(
         return false;
     }
 
-    if *source_metadata != FileMetaData::try_new(destination_file).await {
+    if source_metadata != FileMetaData::try_new(destination_file).await.as_ref() {
         return false;
     }
 
@@ -802,7 +838,7 @@ async fn copy_or_skip_if_same(
     if skip_copy(
         source_file,
         destination_file,
-        &source_metadata,
+        source_metadata.as_ref(),
         message_sender,
     )
     .await
@@ -824,7 +860,7 @@ async fn copy_or_skip_if_same(
         .await
         .map_err(|e| ProcessPathError {
             not_processed: Some(source_file.to_owned()),
-            kind: FileBackupErrorKind::CannotCopyFile {
+            kind: ProcessPathErrorKind::CannotCopyFile {
                 to: destination_file.to_owned(),
                 io_error: e.to_string(),
             },
@@ -838,7 +874,7 @@ async fn copy_or_skip_if_same(
             )));
         })?;
 
-    if set_modified_time(&source_metadata, destination_file)
+    if set_modified_time(source_metadata.as_ref(), destination_file)
         .await
         .is_none()
     {
@@ -852,7 +888,7 @@ async fn copy_or_skip_if_same(
 }
 
 async fn set_modified_time(
-    source_metadata: &Option<FileMetaData>,
+    source_metadata: Option<&FileMetaData>,
     destination_file: &std::path::Path,
 ) -> Option<()> {
     if let Some(source_metadata) = source_metadata
@@ -875,18 +911,19 @@ async fn get_paths_in_destinatination_but_not_in_source(
     recurse_source: RecursiveReadDir,
     recurse_destination: RecursiveReadDir,
 ) -> Result<Vec<std::path::PathBuf>, ProcessPathError> {
+    use futures::stream::TryStreamExt;
+
     let source_root_path = recurse_source.root_directory().to_owned();
     let source_root_path = &source_root_path;
     let destination_root_path = recurse_destination.root_directory().to_owned();
     let destination_root_path = &destination_root_path;
-    use futures::stream::TryStreamExt;
     let source_files: std::collections::HashSet<_> = futures::stream::iter(recurse_source)
         .and_then(async |path| {
             path.strip_prefix(source_root_path)
-                .map(|p| p.to_owned())
+                .map(std::borrow::ToOwned::to_owned)
                 .map_err(|e| ProcessPathError {
                     not_processed: Some(path.clone()),
-                    kind: FileBackupErrorKind::InvariantBroken(
+                    kind: ProcessPathErrorKind::InvariantBroken(
                         InvariantError::CannotStripPrefixOfPath {
                             path_root: source_root_path.to_owned(),
                             path: path.clone(),
@@ -902,10 +939,10 @@ async fn get_paths_in_destinatination_but_not_in_source(
         futures::stream::iter(recurse_destination)
             .and_then(async |path| {
                 path.strip_prefix(destination_root_path)
-                    .map(|p| p.to_owned())
+                    .map(std::borrow::ToOwned::to_owned)
                     .map_err(|e| ProcessPathError {
-                        not_processed: Some(path.to_owned()),
-                        kind: FileBackupErrorKind::InvariantBroken(
+                        not_processed: Some(path.clone()),
+                        kind: ProcessPathErrorKind::InvariantBroken(
                             InvariantError::CannotStripPrefixOfPath {
                                 path_root: destination_root_path.clone(),
                                 path: path.clone(),
@@ -948,7 +985,7 @@ fn validate_or_create_root_paths<P: AsRef<std::path::Path>>(
                     e.to_string(),
                 )
             })
-            .inspect(|_| {
+            .inspect(|()| {
                 message_sender.send(Message::Info(Info::DestinationDirCreated(
                     destination_directory_root.to_owned(),
                 )));
@@ -969,32 +1006,27 @@ async fn backup<P: AsRef<std::path::Path>>(
     let source_directory_root = source_directory_root.as_ref();
     let destination_directory_root = destination_directory_root.as_ref();
 
-    let mut errors = create_all_directories_in_destination(
+    let create_directories_errors = create_all_directories_in_destination(
         source_directory_root,
         destination_directory_root,
         message_sender,
     )
     .await?;
-    let non_exsting_destination_directories: Vec<_> = errors
+
+    let failed_source_directories: Vec<_> = create_directories_errors
         .iter()
-        .filter_map(|e| e.not_processed.as_ref())
+        .filter_map(|error| error.not_processed.as_deref())
         .collect();
 
-    let mut file_backup_errors = backup_all_files(
+    let file_backup_result = backup_all_files(
         source_directory_root,
         destination_directory_root,
-        &non_exsting_destination_directories,
+        &failed_source_directories,
         message_sender,
     )
     .await?;
 
-    errors.append(&mut file_backup_errors);
-
-    if errors.is_empty() {
-        Ok(())
-    } else {
-        Err(Error::FileBackupErrors(errors))
-    }
+    Error::from_processing_results(create_directories_errors, file_backup_result)
 }
 
 pub enum Command {
@@ -1063,7 +1095,7 @@ fn get_destination_file_path(
         .strip_prefix(source_root)
         .map_err(|e| ProcessPathError {
             not_processed: Some(source_path.to_owned()),
-            kind: FileBackupErrorKind::InvariantBroken(InvariantError::CannotStripPrefixOfPath {
+            kind: ProcessPathErrorKind::InvariantBroken(InvariantError::CannotStripPrefixOfPath {
                 path_root: source_root.to_owned(),
                 path: source_path.to_owned(),
                 error: e,
@@ -1073,6 +1105,7 @@ fn get_destination_file_path(
     Ok([destination_root, path_end].iter().collect())
 }
 
+#[allow(clippy::too_many_lines)]
 async fn purge_files_and_dirs_in_destination<P: AsRef<std::path::Path>>(
     source_root: P,
     destination_root: P,
@@ -1096,7 +1129,10 @@ async fn purge_files_and_dirs_in_destination<P: AsRef<std::path::Path>>(
         destination_recurse_directories,
     )
     .await
-    .map_err(|e| Error::FileBackupErrors(vec![e]))?;
+    .map_err(|e| Error::ProcessPathErrors {
+        directories: vec![e],
+        files: vec![],
+    })?;
 
     let num_dirs = futures::stream::iter(dirs_to_delete.clone()).count().await;
     message_sender.send(Message::Progress(Progress::Start(
@@ -1104,7 +1140,7 @@ async fn purge_files_and_dirs_in_destination<P: AsRef<std::path::Path>>(
         ProgressType::DeletingDirs,
     )));
 
-    let mut errors = vec![];
+    let mut errors_directory = vec![];
     let mut deleted_dirs = vec![];
     let mut dir_stream = futures::stream::iter(dirs_to_delete);
     while let Some(dir) = dir_stream.next().await {
@@ -1118,11 +1154,11 @@ async fn purge_files_and_dirs_in_destination<P: AsRef<std::path::Path>>(
         if let Err(e) = tokio::fs::remove_dir_all(&dir).await {
             let error = ProcessPathError {
                 not_processed: Some(dir),
-                kind: FileBackupErrorKind::CannotDeleteDirectory {
+                kind: ProcessPathErrorKind::CannotDeleteDirectory {
                     io_error: e.to_string(),
                 },
             };
-            errors.push(error.clone());
+            errors_directory.push(error.clone());
         } else {
             message_sender.send(Message::Progress(Progress::Increment(
                 Increment::DeletedDir(dir.clone()),
@@ -1144,25 +1180,34 @@ async fn purge_files_and_dirs_in_destination<P: AsRef<std::path::Path>>(
         destination_recurse_files,
     )
     .await
-    .map_err(|e| Error::FileBackupErrors(vec![e]))?;
+    .map_err(|e| Error::ProcessPathErrors {
+        directories: vec![],
+        files: vec![e],
+    })?;
     let num_files = futures::stream::iter(files_to_delete.clone()).count().await;
     message_sender.send(Message::Progress(Progress::Start(
         num_files,
         ProgressType::DeletingFiles,
     )));
 
-    let mut errors_file: Vec<_> = futures::stream::iter(files_to_delete)
+    let errors_file: Vec<_> = futures::stream::iter(files_to_delete)
         .map(async |file| {
+            if deleted_dirs.iter().any(|d| file.starts_with(d)) {
+                message_sender.send(Message::Progress(Progress::Increment(
+                    Increment::FileAlreadyDeleted(file),
+                )));
+                return Ok(());
+            }
             message_sender.send(Message::Info(Info::StartDeletingFile(file.clone())));
             tokio::fs::remove_file(&file)
                 .await
                 .map_err(|e| ProcessPathError {
-                    not_processed: Some(file.to_owned()),
-                    kind: FileBackupErrorKind::CannotDeleteFile {
+                    not_processed: Some(file.clone()),
+                    kind: ProcessPathErrorKind::CannotDeleteFile {
                         io_error: e.to_string(),
                     },
                 })
-                .inspect(|_| {
+                .inspect(|()| {
                     message_sender.send(Message::Progress(Progress::Increment(
                         Increment::DeletedFile(file),
                     )));
@@ -1176,12 +1221,7 @@ async fn purge_files_and_dirs_in_destination<P: AsRef<std::path::Path>>(
         ProgressType::DeletingFiles,
     )));
 
-    if !errors.is_empty() || !errors_file.is_empty() {
-        errors.append(&mut errors_file);
-        Err(Error::FileBackupErrors(errors))
-    } else {
-        Ok(())
-    }
+    Error::from_processing_results(errors_directory, errors_file)
 }
 
 #[cfg(test)]
