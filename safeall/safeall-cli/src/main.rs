@@ -99,7 +99,14 @@ enum Verbosity {
 mod style {
     pub fn progress_bar_style(dottet_style: &str) -> indicatif::ProgressStyle {
         indicatif::ProgressStyle::with_template(&format!(
-            "[{{pos:>7}}/{{len:7}}] {{wide_msg:.{dottet_style}}}"
+            "{{bar}} {{wide_msg:.{dottet_style}}} [{{pos:>}}/{{len:}} ({{eta}})]"
+        ))
+        .unwrap()
+    }
+
+    pub fn progress_bar_style_finished(dottet_style: &str) -> indicatif::ProgressStyle {
+        indicatif::ProgressStyle::with_template(&format!(
+            "[{{pos:>}}/{{len:}}] {{wide_msg:.{dottet_style}}}"
         ))
         .unwrap()
     }
@@ -141,6 +148,10 @@ mod style {
     pub const fn increment_success_dotted() -> &'static str {
         "7"
     }
+
+    pub fn increment_info_dotted() -> &'static str {
+        "7"
+    }
 }
 
 impl CliOutput {
@@ -157,17 +168,25 @@ impl CliOutput {
         match self.verbosity {
             Verbosity::Normal => match message {
                 M::Warning(warning) => {
-                    // if let Some(ref progress_bar) = self.progress_bar {
-                    //     progress_bar.set_style(Self::warning_style());
-                    //     progress_bar.set_message(format!("{warning}"));
-                    // }
-                    // self.warnings.push(warning);
+                    if let Some(progress_bar) = &self.progress_bar {
+                        progress_bar.set_style(style::progress_bar_style(style::warning_dotted()));
+                        progress_bar.set_message(format!("{warning}"));
+                        eprintln!(); // Such that the does not get overwritten
+                    } else {
+                        eprintln!(
+                            "{}",
+                            style::warning().apply_to(format!("WARNING: {warning}"))
+                        );
+                    }
                 }
                 M::Info(info) => {
-                    // if let Some(ref progress_bar) = self.progress_bar {
-                    //     progress_bar.set_style(Self::info_style());
-                    //     progress_bar.set_message(format!("{info}"));
-                    // }
+                    if let Some(progress_bar) = &self.progress_bar {
+                        progress_bar
+                            .set_style(style::progress_bar_style(style::increment_info_dotted()));
+                        progress_bar.set_message(format!("{info}"));
+                    } else {
+                        println!("{}", style::info().apply_to(format!("INFO: {info}")));
+                    }
                 }
                 M::Progress(ref progress) => match progress {
                     P::Start(total, _) => {
@@ -184,16 +203,18 @@ impl CliOutput {
                     }
                     P::EndFail(_, _) => {
                         if let Some(ref progress_bar) = self.progress_bar {
-                            progress_bar
-                                .set_style(style::progress_bar_style(style::increment_fail_dotted()));
+                            progress_bar.set_style(style::progress_bar_style_finished(
+                                style::increment_fail_dotted(),
+                            ));
                             progress_bar.abandon_with_message(format!("{progress}"));
                         }
                         self.progress_bar = None;
                     }
                     P::EndSuccess(_) => {
                         if let Some(ref progress_bar) = self.progress_bar {
-                            progress_bar
-                                .set_style(style::progress_bar_style(style::success_dotted()));
+                            progress_bar.set_style(style::progress_bar_style_finished(
+                                style::success_dotted(),
+                            ));
                             progress_bar.abandon_with_message(format!("{progress}"));
                         }
                         self.progress_bar = None;
@@ -204,7 +225,7 @@ impl CliOutput {
                                 style::increment_fail_dotted(),
                             ));
                             progress_bar.set_message(format!("{progress}"));
-                            // progress_bar.tick();
+                            eprintln!(); // Such that the does not get overwritten
                         }
                     }
                 },

@@ -634,10 +634,12 @@ impl std::fmt::Display for Progress {
                 }
             },
             Progress::EndSuccess(progress_type) => match progress_type {
-                ProgressType::CreatingDirectories => write!(f, "Finished creating directories."),
-                ProgressType::CopingFiles => write!(f, "Finished coping files."),
-                ProgressType::DeletingDirs => write!(f, "Finished deleting directories."),
-                ProgressType::DeletingFiles => write!(f, "Finished deleting files."),
+                ProgressType::CreatingDirectories => {
+                    write!(f, "Finished creating all directories.")
+                }
+                ProgressType::CopingFiles => write!(f, "Finished coping all files."),
+                ProgressType::DeletingDirs => write!(f, "Finished deleting all directories."),
+                ProgressType::DeletingFiles => write!(f, "Finished deleting all files."),
             },
             Progress::IncrementSuccess(increment) => match increment {
                 Increment::SkippingFileNoModification {
