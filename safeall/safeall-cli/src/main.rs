@@ -98,6 +98,24 @@ enum Verbosity {
 }
 
 impl CliOutput {
+    fn waring_style() -> console::Style {
+        console::Style::new().yellow()
+    }
+    fn success_style() -> console::Style {
+        console::Style::new().green()
+    }
+    fn info_style() -> console::Style {
+        console::Style::new()
+    }
+    fn increment_fail_style() -> console::Style {
+        console::Style::new().red()
+    }
+    fn error_style() -> console::Style {
+        console::Style::new().color256(124)
+    }
+    fn increment_success_style() -> console::Style {
+        console::Style::new().color256(7)
+    }
     fn new(verbosity: Verbosity) -> Self {
         let progress_bar = None;
         Self {
@@ -122,41 +140,67 @@ impl CliOutput {
                         progress_bar.set_message(format!("{info}"));
                     }
                 }
-                M::Error(_) => {
-                    // Do not display errors before the end
-                }
                 M::Progress(ref progress) => match progress {
                     P::Start(total, _) => {
                         self.create_progress_bar(*total, format!("{progress}"));
                     }
-                    P::Increment(_) => {
+                    P::IncrementSuccess(_) => {
                         if let Some(ref progress_bar) = self.progress_bar {
                             progress_bar.inc(1);
                             progress_bar.set_message(format!("{progress}"));
                         }
                     }
-                    P::End(_) => {
+                    P::EndSuccess(_) | P::EndFail(_, _) => {
                         if let Some(ref progress_bar) = self.progress_bar {
                             progress_bar.abandon_with_message(format!("{progress}"));
                         }
                         self.progress_bar = None;
                         while let Some(warning) = self.warnings.pop() {
-                            eprintln!("{}", console::style(format!("WARNING: {warning}")).yellow());
+                            eprintln!(
+                                "{}",
+                                CliOutput::waring_style().apply_to(format!("WARNING: {warning}"))
+                            );
+                        }
+                    }
+                    P::IncrementFail(_) => {
+                        if let Some(ref progress_bar) = self.progress_bar {
+                            progress_bar.set_message(format!("{progress}"));
                         }
                     }
                 },
             },
             Verbosity::Verbose => match message {
                 M::Warning(warning) => {
-                    eprintln!("{}", console::style(format!("WARNING: {warning}")).yellow());
+                    eprintln!(
+                        "{}",
+                        CliOutput::waring_style().apply_to(format!("WARNING: {warning}"))
+                    );
                 }
                 M::Info(info) => {
-                    println!("{}", console::style(format!("INFO: {info}")));
+                    println!(
+                        "{}",
+                        CliOutput::info_style().apply_to(format!("INFO: {info}"))
+                    );
                 }
-                M::Error(error) => {
-                    eprintln!("{}", console::style(format!("ERROR: {error}")).red());
+                M::Progress(progress) => {
+                    let style = match progress {
+                        P::IncrementSuccess(_) => CliOutput::increment_success_style()
+                            .apply_to(format!("INFO: {progress}")),
+                        P::IncrementFail(_) => {
+                            CliOutput::increment_fail_style().apply_to(format!("ERROR: {progress}"))
+                        }
+                        P::EndSuccess(_) => {
+                            CliOutput::success_style().apply_to(format!("INFO: {progress}"))
+                        }
+                        P::EndFail(_, _) => {
+                            CliOutput::error_style().apply_to(format!("ERROR: {progress}"))
+                        }
+                        P::Start(_, _) => {
+                            CliOutput::info_style().apply_to(format!("INFO: {progress}"))
+                        }
+                    };
+                    println!("{style}");
                 }
-                M::Progress(_) => {}
             },
         }
     }
@@ -194,21 +238,17 @@ async fn cli() -> bool {
     match run.await {
         Ok(result) => {
             if let Err(error) = result {
-                match error {
-                    safeall::Error::ProcessPathErrors { directories, files } => {
-                        for error in directories.iter().chain(&files) {
-                            eprintln!("{}", console::style(format!("ERROR: {error}")).red());
-                        }
-                    }
-                    _ => eprintln!("{}", console::style(format!("ERROR: {error}")).red()),
-                }
+                eprintln!(
+                    "{}",
+                    CliOutput::error_style().apply_to(format!("ERROR: {error}"))
+                );
                 return false;
             }
         }
         Err(error) => {
             eprintln!(
                 "{}",
-                console::style(format!("ERROR: Could execute command: {error}")).red()
+                CliOutput::error_style().apply_to(format!("ERROR: Could execute command: {error}"))
             );
             return false;
         }

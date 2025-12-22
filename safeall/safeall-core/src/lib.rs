@@ -271,13 +271,14 @@ impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Error::ProcessPathErrors { directories, files } => {
-                directories.iter().enumerate().try_for_each(|(i, e)| {
-                    let end = if i == directories.len() - 1 { "" } else { "\n" };
-                    write!(f, "{e}{end}")
-                })?;
-                files.iter().enumerate().try_for_each(|(i, e)| {
-                    let end = if i == files.len() - 1 { "" } else { "\n" };
-                    write!(f, "{e}{end}")
+                let all_errors = directories.iter().chain(files);
+                let num_errors = directories.len() + files.len();
+                let name = if num_errors > 1 { "errors" } else { "error" };
+                writeln!(f, "In total {num_errors} {name} occured:")?;
+
+                all_errors.enumerate().try_for_each(|(i, e)| {
+                    let end = if i == num_errors - 1 { "" } else { "\n" };
+                    write!(f, "\t* {e}{end}")
                 })
             }
             Error::SourceRootPathDoesNotExist(path) => write!(
@@ -338,12 +339,16 @@ async fn backup_all_files(
                 .iter()
                 .any(|d| source_file.starts_with(d))
             {
+                // tokio::time::sleep(tokio::time::Duration::from_millis(1500)).await;
                 // Do not try to copy files for directories that do not exist, fail instantly
-                return Err(ProcessPathError {
+                let error = ProcessPathError {
                     not_processed: Some(source_file.clone()),
                     kind: ProcessPathErrorKind::CannotCopyFileDirectoyNotExisting,
-                });
+                };
+                message_sender.send(Message::Progress(Progress::IncrementFail(error.clone())));
+                return Err(error);
             }
+            // tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
             backup_single_file(
                 source_directory_root,
                 destination_directory_root,
@@ -351,12 +356,24 @@ async fn backup_all_files(
                 message_sender,
             )
             .await
+            .inspect_err(|e| {
+                message_sender.send(Message::Progress(Progress::IncrementFail(e.clone())));
+            })
         })
         .buffer_unordered(cpu_count())
         .filter_map(async move |res| res.err())
         .collect()
         .await;
-    message_sender.send(Message::Progress(Progress::End(ProgressType::CopingFiles)));
+    if errors.is_empty() {
+        message_sender.send(Message::Progress(Progress::EndSuccess(
+            ProgressType::CopingFiles,
+        )));
+    } else {
+        message_sender.send(Message::Progress(Progress::EndFail(
+            errors.len(),
+            ProgressType::CopingFiles,
+        )));
+    }
     Ok(errors)
 }
 
@@ -409,6 +426,7 @@ async fn create_all_directories_in_destination(
     let mut source_stream = futures::stream::iter(source_recurse_directories);
     let mut errors = vec![];
     while let Some(source_directory) = source_stream.next().await {
+        // tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
         match source_directory {
             Ok(source_directory) => {
                 if errors.iter().any(|e: &ProcessPathError| {
@@ -426,15 +444,26 @@ async fn create_all_directories_in_destination(
                 )
                 .await
                 {
+                    message_sender.send(Message::Progress(Progress::IncrementFail(err.clone())));
                     errors.push(err);
                 }
             }
-            Err(err) => errors.push(err),
+            Err(err) => {
+                message_sender.send(Message::Progress(Progress::IncrementFail(err.clone())));
+                errors.push(err);
+            }
         }
     }
-    message_sender.send(Message::Progress(Progress::End(
-        ProgressType::CreatingDirectories,
-    )));
+    if errors.is_empty() {
+        message_sender.send(Message::Progress(Progress::EndSuccess(
+            ProgressType::CreatingDirectories,
+        )));
+    } else {
+        message_sender.send(Message::Progress(Progress::EndFail(
+            errors.len(),
+            ProgressType::CreatingDirectories,
+        )));
+    }
     Ok(errors)
 }
 
@@ -454,7 +483,7 @@ async fn create_single_directory_if_not_exists(
     if new_destination_dir.exists() {
         // If it already exists it must be a directory too
         if new_destination_dir.is_dir() {
-            message_sender.send(Message::Progress(Progress::Increment(
+            message_sender.send(Message::Progress(Progress::IncrementSuccess(
                 Increment::DestinationDirAlreadyExists {
                     source: source_directory.clone(),
                     destination: new_destination_dir.clone(),
@@ -484,7 +513,7 @@ async fn create_single_directory_if_not_exists(
                 },
             })
             .inspect(|()| {
-                message_sender.send(Message::Progress(Progress::Increment(
+                message_sender.send(Message::Progress(Progress::IncrementSuccess(
                     Increment::DirCreated {
                         source: source_directory,
                         destination: new_destination_dir,
@@ -571,28 +600,49 @@ pub enum ProgressEnd {
 #[derive(Debug)]
 pub enum Progress {
     Start(usize, ProgressType),
-    Increment(Increment),
-    End(ProgressType),
+    IncrementSuccess(Increment),
+    IncrementFail(ProcessPathError),
+    EndSuccess(ProgressType),
+    EndFail(usize, ProgressType),
 }
 
+#[allow(clippy::too_many_lines)]
 impl std::fmt::Display for Progress {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Progress::Start(total, progress_type) => match progress_type {
                 ProgressType::CreatingDirectories => {
-                    write!(f, "Start creating {total} directories.")
+                    let name = if *total > 1 {
+                        "directories"
+                    } else {
+                        "directory"
+                    };
+                    write!(f, "Start creating {total} {name}.")
                 }
-                ProgressType::CopingFiles => write!(f, "Start coping {total} files."),
-                ProgressType::DeletingDirs => write!(f, "Start deleting {total} directories."),
-                ProgressType::DeletingFiles => write!(f, "Start deleting {total} files."),
+                ProgressType::CopingFiles => {
+                    let name = if *total > 1 { "files" } else { "file" };
+                    write!(f, "Start coping {total} {name}.")
+                }
+                ProgressType::DeletingDirs => {
+                    let name = if *total > 1 {
+                        "directories"
+                    } else {
+                        "directory"
+                    };
+                    write!(f, "Start deleting {total} {name}.")
+                }
+                ProgressType::DeletingFiles => {
+                    let name = if *total > 1 { "files" } else { "file" };
+                    write!(f, "Start deleting {total} {name}.")
+                }
             },
-            Progress::End(progress_type) => match progress_type {
+            Progress::EndSuccess(progress_type) => match progress_type {
                 ProgressType::CreatingDirectories => write!(f, "Finished creating directories."),
                 ProgressType::CopingFiles => write!(f, "Finished coping files."),
                 ProgressType::DeletingDirs => write!(f, "Finished deleting directories."),
                 ProgressType::DeletingFiles => write!(f, "Finished deleting files."),
             },
-            Progress::Increment(increment) => match increment {
+            Progress::IncrementSuccess(increment) => match increment {
                 Increment::SkippingFileNoModification {
                     source,
                     destination,
@@ -640,6 +690,34 @@ impl std::fmt::Display for Progress {
                 ),
                 Increment::FileAlreadyDeleted(path) => {
                     write!(f, "File \"{}\" has already been deleted.", path.display())
+                }
+            },
+            Progress::IncrementFail(error) => write!(f, "{error}"),
+            Progress::EndFail(failed, progress_type) => match progress_type {
+                ProgressType::CreatingDirectories => {
+                    let name = if *failed > 1 {
+                        "directories"
+                    } else {
+                        "directory"
+                    };
+                    write!(f, "Could not create {failed} {name}.")
+                }
+                ProgressType::CopingFiles => {
+                    let name = if *failed > 1 { "files" } else { "file" };
+
+                    write!(f, "Could not copy {failed} {name}.")
+                }
+                ProgressType::DeletingDirs => {
+                    let name = if *failed > 1 {
+                        "directories"
+                    } else {
+                        "directory"
+                    };
+                    write!(f, "Could not delete {failed} {name}.")
+                }
+                ProgressType::DeletingFiles => {
+                    let name = if *failed > 1 { "files" } else { "file" };
+                    write!(f, "Could not delete {failed} {name}.")
                 }
             },
         }
@@ -770,11 +848,9 @@ impl std::fmt::Display for Warning {
 
 #[derive(Debug)]
 pub enum Message {
-    // TODO: Maybe we should send the errors here?
     Warning(Warning),
     Info(Info),
     Progress(Progress),
-    Error(ProcessPathError),
 }
 
 async fn skip_copy(
@@ -843,7 +919,7 @@ async fn copy_or_skip_if_same(
     )
     .await
     {
-        message_sender.send(Message::Progress(Progress::Increment(
+        message_sender.send(Message::Progress(Progress::IncrementSuccess(
             Increment::SkippingFileNoModification {
                 source: source_file.to_owned(),
                 destination: destination_file.to_owned(),
@@ -866,7 +942,7 @@ async fn copy_or_skip_if_same(
             },
         })
         .inspect(|_| {
-            message_sender.send(Message::Progress(Progress::Increment(
+            message_sender.send(Message::Progress(Progress::IncrementSuccess(
                 Increment::FileCopied {
                     source: source_file.to_owned(),
                     destination: destination_file.to_owned(),
@@ -1145,7 +1221,7 @@ async fn purge_files_and_dirs_in_destination<P: AsRef<std::path::Path>>(
     let mut dir_stream = futures::stream::iter(dirs_to_delete);
     while let Some(dir) = dir_stream.next().await {
         if deleted_dirs.iter().any(|d| dir.starts_with(d)) {
-            message_sender.send(Message::Progress(Progress::Increment(
+            message_sender.send(Message::Progress(Progress::IncrementSuccess(
                 Increment::DirectoryAlreadyDeleted(dir),
             )));
             continue;
@@ -1158,15 +1234,25 @@ async fn purge_files_and_dirs_in_destination<P: AsRef<std::path::Path>>(
                     io_error: e.to_string(),
                 },
             };
-            errors_directory.push(error.clone());
+            message_sender.send(Message::Progress(Progress::IncrementFail(error.clone())));
+            errors_directory.push(error);
         } else {
-            message_sender.send(Message::Progress(Progress::Increment(
+            message_sender.send(Message::Progress(Progress::IncrementSuccess(
                 Increment::DeletedDir(dir.clone()),
             )));
             deleted_dirs.push(dir);
         }
     }
-    message_sender.send(Message::Progress(Progress::End(ProgressType::DeletingDirs)));
+    if errors_directory.is_empty() {
+        message_sender.send(Message::Progress(Progress::EndSuccess(
+            ProgressType::DeletingDirs,
+        )));
+    } else {
+        message_sender.send(Message::Progress(Progress::EndFail(
+            errors_directory.len(),
+            ProgressType::DeletingDirs,
+        )));
+    }
 
     let source_recurse_files = RecursiveReadDir::try_new(source_root, ReadDirType::FilesOnly)
         .map_err(|e| Error::CannotReadDirectoryContent(source_root.to_owned(), e.to_string()))?;
@@ -1193,7 +1279,7 @@ async fn purge_files_and_dirs_in_destination<P: AsRef<std::path::Path>>(
     let errors_file: Vec<_> = futures::stream::iter(files_to_delete)
         .map(async |file| {
             if deleted_dirs.iter().any(|d| file.starts_with(d)) {
-                message_sender.send(Message::Progress(Progress::Increment(
+                message_sender.send(Message::Progress(Progress::IncrementSuccess(
                     Increment::FileAlreadyDeleted(file),
                 )));
                 return Ok(());
@@ -1208,18 +1294,28 @@ async fn purge_files_and_dirs_in_destination<P: AsRef<std::path::Path>>(
                     },
                 })
                 .inspect(|()| {
-                    message_sender.send(Message::Progress(Progress::Increment(
+                    message_sender.send(Message::Progress(Progress::IncrementSuccess(
                         Increment::DeletedFile(file),
                     )));
+                })
+                .inspect_err(|e| {
+                    message_sender.send(Message::Progress(Progress::IncrementFail(e.clone())));
                 })
         })
         .buffer_unordered(cpu_count())
         .filter_map(async move |res| res.err())
         .collect()
         .await;
-    message_sender.send(Message::Progress(Progress::End(
-        ProgressType::DeletingFiles,
-    )));
+    if errors_file.is_empty() {
+        message_sender.send(Message::Progress(Progress::EndSuccess(
+            ProgressType::DeletingFiles,
+        )));
+    } else {
+        message_sender.send(Message::Progress(Progress::EndFail(
+            errors_file.len(),
+            ProgressType::DeletingFiles,
+        )));
+    }
 
     Error::from_processing_results(errors_directory, errors_file)
 }
