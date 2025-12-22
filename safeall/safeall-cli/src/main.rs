@@ -89,7 +89,6 @@ impl safeall::MessageSender for CliMessageSender {
 struct CliOutput {
     progress_bar: Option<indicatif::ProgressBar>,
     verbosity: Verbosity,
-    warnings: Vec<safeall::Warning>,
 }
 
 enum Verbosity {
@@ -97,30 +96,58 @@ enum Verbosity {
     Verbose,
 }
 
+mod style {
+    pub fn progress_bar_style(dottet_style: &str) -> indicatif::ProgressStyle {
+        indicatif::ProgressStyle::with_template(&format!(
+            "[{{pos:>7}}/{{len:7}}] {{wide_msg:.{dottet_style}}}"
+        ))
+        .unwrap()
+    }
+
+    pub fn warning() -> console::Style {
+        console::Style::from_dotted_str(warning_dotted())
+    }
+    pub fn success() -> console::Style {
+        console::Style::from_dotted_str(success_dotted())
+    }
+    pub fn info() -> console::Style {
+        console::Style::from_dotted_str(info_dotted())
+    }
+    pub fn increment_fail() -> console::Style {
+        console::Style::from_dotted_str(increment_fail_dotted())
+    }
+    pub fn error() -> console::Style {
+        console::Style::from_dotted_str(error_dotted())
+    }
+    pub fn increment_success() -> console::Style {
+        console::Style::from_dotted_str(increment_success_dotted())
+    }
+
+    pub const fn warning_dotted() -> &'static str {
+        "yellow"
+    }
+    pub const fn success_dotted() -> &'static str {
+        "green"
+    }
+    pub const fn info_dotted() -> &'static str {
+        ""
+    }
+    pub const fn increment_fail_dotted() -> &'static str {
+        "red"
+    }
+    pub const fn error_dotted() -> &'static str {
+        "124"
+    }
+    pub const fn increment_success_dotted() -> &'static str {
+        "7"
+    }
+}
+
 impl CliOutput {
-    fn waring_style() -> console::Style {
-        console::Style::new().yellow()
-    }
-    fn success_style() -> console::Style {
-        console::Style::new().green()
-    }
-    fn info_style() -> console::Style {
-        console::Style::new()
-    }
-    fn increment_fail_style() -> console::Style {
-        console::Style::new().red()
-    }
-    fn error_style() -> console::Style {
-        console::Style::new().color256(124)
-    }
-    fn increment_success_style() -> console::Style {
-        console::Style::new().color256(7)
-    }
     fn new(verbosity: Verbosity) -> Self {
         let progress_bar = None;
         Self {
             progress_bar,
-            warnings: vec![],
             verbosity,
         }
     }
@@ -130,15 +157,17 @@ impl CliOutput {
         match self.verbosity {
             Verbosity::Normal => match message {
                 M::Warning(warning) => {
-                    if let Some(ref progress_bar) = self.progress_bar {
-                        progress_bar.set_message(format!("{warning}"));
-                    }
-                    self.warnings.push(warning);
+                    // if let Some(ref progress_bar) = self.progress_bar {
+                    //     progress_bar.set_style(Self::warning_style());
+                    //     progress_bar.set_message(format!("{warning}"));
+                    // }
+                    // self.warnings.push(warning);
                 }
                 M::Info(info) => {
-                    if let Some(ref progress_bar) = self.progress_bar {
-                        progress_bar.set_message(format!("{info}"));
-                    }
+                    // if let Some(ref progress_bar) = self.progress_bar {
+                    //     progress_bar.set_style(Self::info_style());
+                    //     progress_bar.set_message(format!("{info}"));
+                    // }
                 }
                 M::Progress(ref progress) => match progress {
                     P::Start(total, _) => {
@@ -146,25 +175,36 @@ impl CliOutput {
                     }
                     P::IncrementSuccess(_) => {
                         if let Some(ref progress_bar) = self.progress_bar {
-                            progress_bar.inc(1);
+                            progress_bar.set_style(style::progress_bar_style(
+                                style::increment_success_dotted(),
+                            ));
                             progress_bar.set_message(format!("{progress}"));
+                            progress_bar.inc(1);
                         }
                     }
-                    P::EndSuccess(_) | P::EndFail(_, _) => {
+                    P::EndFail(_, _) => {
                         if let Some(ref progress_bar) = self.progress_bar {
+                            progress_bar
+                                .set_style(style::progress_bar_style(style::increment_fail_dotted()));
                             progress_bar.abandon_with_message(format!("{progress}"));
                         }
                         self.progress_bar = None;
-                        while let Some(warning) = self.warnings.pop() {
-                            eprintln!(
-                                "{}",
-                                CliOutput::waring_style().apply_to(format!("WARNING: {warning}"))
-                            );
+                    }
+                    P::EndSuccess(_) => {
+                        if let Some(ref progress_bar) = self.progress_bar {
+                            progress_bar
+                                .set_style(style::progress_bar_style(style::success_dotted()));
+                            progress_bar.abandon_with_message(format!("{progress}"));
                         }
+                        self.progress_bar = None;
                     }
                     P::IncrementFail(_) => {
                         if let Some(ref progress_bar) = self.progress_bar {
+                            progress_bar.set_style(style::progress_bar_style(
+                                style::increment_fail_dotted(),
+                            ));
                             progress_bar.set_message(format!("{progress}"));
+                            // progress_bar.tick();
                         }
                     }
                 },
@@ -173,31 +213,23 @@ impl CliOutput {
                 M::Warning(warning) => {
                     eprintln!(
                         "{}",
-                        CliOutput::waring_style().apply_to(format!("WARNING: {warning}"))
+                        style::warning().apply_to(format!("WARNING: {warning}"))
                     );
                 }
                 M::Info(info) => {
-                    println!(
-                        "{}",
-                        CliOutput::info_style().apply_to(format!("INFO: {info}"))
-                    );
+                    println!("{}", style::info().apply_to(format!("INFO: {info}")));
                 }
                 M::Progress(progress) => {
                     let style = match progress {
-                        P::IncrementSuccess(_) => CliOutput::increment_success_style()
-                            .apply_to(format!("INFO: {progress}")),
+                        P::IncrementSuccess(_) => {
+                            style::increment_success().apply_to(format!("INFO: {progress}"))
+                        }
                         P::IncrementFail(_) => {
-                            CliOutput::increment_fail_style().apply_to(format!("ERROR: {progress}"))
+                            style::increment_fail().apply_to(format!("ERROR: {progress}"))
                         }
-                        P::EndSuccess(_) => {
-                            CliOutput::success_style().apply_to(format!("INFO: {progress}"))
-                        }
-                        P::EndFail(_, _) => {
-                            CliOutput::error_style().apply_to(format!("ERROR: {progress}"))
-                        }
-                        P::Start(_, _) => {
-                            CliOutput::info_style().apply_to(format!("INFO: {progress}"))
-                        }
+                        P::EndSuccess(_) => style::success().apply_to(format!("INFO: {progress}")),
+                        P::EndFail(_, _) => style::error().apply_to(format!("ERROR: {progress}")),
+                        P::Start(_, _) => style::info().apply_to(format!("INFO: {progress}")),
                     };
                     println!("{style}");
                 }
@@ -207,11 +239,7 @@ impl CliOutput {
 
     fn create_progress_bar(&mut self, length: usize, message: String) {
         let progress_bar = indicatif::ProgressBar::new(length as u64);
-        progress_bar.set_style(
-            indicatif::ProgressStyle::with_template("[{pos:>7}/{len:7}] {spinner} {wide_msg}")
-                .unwrap()
-                .tick_chars("⠁⠂⠄⡀⢀⠠⠐⠈ "),
-        );
+        progress_bar.set_style(style::progress_bar_style(style::info_dotted()));
         progress_bar.set_message(message);
         self.progress_bar = Some(progress_bar);
     }
@@ -238,17 +266,14 @@ async fn cli() -> bool {
     match run.await {
         Ok(result) => {
             if let Err(error) = result {
-                eprintln!(
-                    "{}",
-                    CliOutput::error_style().apply_to(format!("ERROR: {error}"))
-                );
+                eprintln!("{}", style::error().apply_to(format!("ERROR: {error}")));
                 return false;
             }
         }
         Err(error) => {
             eprintln!(
                 "{}",
-                CliOutput::error_style().apply_to(format!("ERROR: Could execute command: {error}"))
+                style::error().apply_to(format!("ERROR: Could execute command: {error}"))
             );
             return false;
         }
