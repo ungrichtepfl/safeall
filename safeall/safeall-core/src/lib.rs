@@ -339,7 +339,6 @@ async fn backup_all_files(
                 .iter()
                 .any(|d| source_file.starts_with(d))
             {
-                // tokio::time::sleep(tokio::time::Duration::from_millis(1500)).await;
                 // Do not try to copy files for directories that do not exist, fail instantly
                 let error = ProcessPathError {
                     not_processed: Some(source_file.clone()),
@@ -348,7 +347,6 @@ async fn backup_all_files(
                 message_sender.send(Message::Progress(Progress::IncrementFail(error.clone())));
                 return Err(error);
             }
-            // tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
             backup_single_file(
                 source_directory_root,
                 destination_directory_root,
@@ -426,7 +424,6 @@ async fn create_all_directories_in_destination(
     let mut source_stream = futures::stream::iter(source_recurse_directories);
     let mut errors = vec![];
     while let Some(source_directory) = source_stream.next().await {
-        // tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
         match source_directory {
             Ok(source_directory) => {
                 if errors.iter().any(|e: &ProcessPathError| {
