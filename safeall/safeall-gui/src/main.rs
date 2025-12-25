@@ -5,6 +5,8 @@ enum Message {
     StartRestore,
     BackupUpdate(safeall::Message),
     BackupFinished(Result<(), safeall::Error>),
+    ChooseSource,
+    SourceFileChosen(Option<std::path::PathBuf>),
 }
 
 #[derive(Default)]
@@ -22,7 +24,8 @@ enum BackupState {
 struct Gui {
     backup_state: BackupState,
 }
-
+// TODO: https://github.com/harmony-development/Loqui/blob/master/src/screen/mod.rs#L1336
+// https://docs.rs/directories/6.0.0/directories/
 impl Gui {
     fn view(&self) -> iced::widget::Column<'_, Message> {
         use iced::widget::{button, column};
@@ -30,6 +33,7 @@ impl Gui {
             button("Backup").on_press(Message::StartBackup),
             button("Sync").on_press(Message::StartSync),
             button("Restore").on_press(Message::StartRestore),
+            button("Choose").on_press(Message::ChooseSource),
         ]
     }
     fn update(&mut self, message: Message) -> iced::Task<Message> {
@@ -52,8 +56,23 @@ impl Gui {
                 println!("{result:?}");
                 iced::Task::none()
             }
+            Message::ChooseSource => {
+                iced::Task::perform(Gui::choose_directory(), Message::SourceFileChosen)
+            }
+            Message::SourceFileChosen(path) => {
+                println!("{path:?}");
+                iced::Task::none()
+            }
         }
     }
+
+    async fn choose_directory() -> Option<std::path::PathBuf> {
+        rfd::AsyncFileDialog::new()
+            .pick_folder()
+            .await
+            .map(|d| d.path().to_owned())
+    }
+
     fn theme(&self) -> iced::Theme {
         iced::Theme::Light
     }
