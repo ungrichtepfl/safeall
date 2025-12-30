@@ -55,7 +55,7 @@ impl Gui {
         let hover_text = |t| {
             container(text(t).size(12))
                 .padding(10)
-                .style(container::rounded_box)
+                .style(container::bordered_box)
                 .max_width(300)
         };
         let errors_and_warnings_text = "";
