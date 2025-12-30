@@ -9,7 +9,11 @@ safeall-core.workspace = true
 
 iced = { version = "0.14.0", features = ["tokio", "sipper"] }
 tokio.workspace = true
-rfd = { version = "0.16.0", features = ["tokio", "wayland", "xdg-portal"], default-features = false }
+rfd = { version = "0.16.0", features = [
+  "tokio",
+  "wayland",
+  "xdg-portal",
+], default-features = false }
 
 [lints.clippy]
 pedantic = "warn"
