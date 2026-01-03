@@ -20,6 +20,7 @@ enum Message {
     NoDestinationSet,
     DestinationInputChanged(String),
     SourceInputChanged(String),
+    OpenPath(std::path::PathBuf),
 }
 
 #[derive(Default, Debug)]
@@ -44,89 +45,168 @@ struct Gui {
 // https://docs.rs/directories/6.0.0/directories/
 impl Gui {
     fn view(&self) -> iced::Element<'_, Message> {
-        use iced::Length::Fill;
-        use iced::widget::{
-            button, center, center_x, column, container, progress_bar, row, scrollable, text,
-            text_input, tooltip,
+        use iced::widget::{center_x, column};
+
+        let content = column![
+            self.view_title(),
+            self.view_user_input(),
+            self.view_progress(),
+            self.view_errors_and_warnings(),
+        ]
+        .spacing(20);
+
+        center_x(content).padding([20, 20]).into()
+    }
+
+    fn view_title(&self) -> iced::Element<'_, Message> {
+        use iced::widget::{center_x, text};
+        let title = center_x(text("Safeall").font(FONT_BOLD).size(28));
+
+        title.into()
+    }
+
+    fn view_user_input(&self) -> iced::Element<'_, Message> {
+        use iced::border;
+        use iced::widget::{button, center_x, column, container, row, text, text_input, tooltip};
+
+        let directory_input = move |txt, on_input: fn(String) -> Message, on_press| {
+            row![
+                text_input(
+                    txt,
+                    self.source
+                        .as_ref()
+                        .map_or(String::new(), |p| p.display().to_string())
+                        .as_str()
+                )
+                .on_input(on_input),
+                button("Select")
+                    .on_press(on_press)
+                    .height(30)
+                    .style(|theme, status| {
+                        let mut style = button::primary(theme, status);
+                        style.border.radius = border::Radius::new(15);
+                        style
+                    })
+            ]
+            .spacing(5)
         };
 
-        let progress_bar = progress_bar(0.0..=100.0, 0.0);
-        let progress_info = "Nothing to do...";
-        let hover_text = |t| {
-            container(text(t).size(12))
+        let choose_directories = column![
+            directory_input(
+                "Choose source folder for your backup...",
+                Message::SourceInputChanged,
+                Message::ChooseSource
+            ),
+            directory_input(
+                "Choose destination folder for your backup...",
+                Message::DestinationInputChanged,
+                Message::ChooseDestination
+            ),
+        ]
+        .spacing(5);
+
+        let hover_text = move |txt| {
+            container(text(txt).size(12))
                 .padding(10)
                 .style(container::bordered_box)
                 .max_width(300)
         };
-        let errors_and_warnings_text = "";
+
+        let backup_button = move |button_txt, on_press, hover_txt| {
+            tooltip(
+                button(button_txt)
+                    .on_press(on_press)
+                    .height(30)
+                    .style(|theme, status| {
+                        let mut style = button::primary(theme, status);
+                        style.border.radius = border::Radius::new(15);
+                        style
+                    }),
+                hover_text(hover_txt),
+                tooltip::Position::Bottom,
+            )
+        };
+
+        let backup_buttons = center_x(
+            row![
+                backup_button(
+                    "Backup",
+                    Message::StartBackup,
+                    "Will backup your source folder into your destination folder. \
+                        This NEVER deletes a file which is in the destination but not in \
+                        the source folder."
+                ),
+                backup_button(
+                    "Sync",
+                    Message::StartSync,
+                    "Will make your destination identical with your source. \
+                        This will DELETE files that are in the destination but not in \
+                        the source folder."
+                ),
+                backup_button(
+                    "Restore",
+                    Message::StartRestore,
+                    "Will restore your source folder from your destination folder. \
+                        This will NEVER delete files that are in the source but not in \
+                        the destination folder."
+                ),
+                backup_button(
+                    "Sync Restore",
+                    Message::StartSyncRestore,
+                    "Will make your source folder identical with your destination folder.\
+                        This will DELETE files that are in the source but not in \
+                        the destination folder."
+                ),
+            ]
+            .spacing(20),
+        );
+
+        let user_input = column![choose_directories, backup_buttons].spacing(10);
+        user_input.into()
+    }
+
+    fn view_progress(&self) -> iced::Element<'_, Message> {
+        use iced::widget::{center_x, column, progress_bar, text};
+
+        let progress_bar = progress_bar(0.0..=100.0, 32.0);
+        let progress_info = "Nothing to do...";
+        let progress = column![text(progress_info).size(12), center_x(progress_bar)];
+        progress.into()
+    }
+
+    fn view_errors_and_warnings(&self) -> iced::Element<'_, Message> {
+        const ROWS: [&str; 20] = ["/home/chrigi"; 20];
+
+        use iced::Length::Fill;
+        use iced::alignment::Alignment::Center;
+        use iced::alignment::Horizontal::Right;
+        use iced::widget::{button, column, container, scrollable, table, text};
+
+        let columns = {
+            let bold = |header| text(header).font(FONT_BOLD);
+            [
+                table::column(bold("File"), |path: &std::path::Path| {
+                    button(text(path.display().to_string()))
+                        .style(button::text)
+                        .on_press(Message::OpenPath(path.to_owned()))
+                })
+                .align_y(Center),
+                table::column(bold("Error"), |path: &std::path::Path| text("Some Error"))
+                    .align_y(Center)
+                    .width(Fill),
+            ]
+        };
+
         let errors_and_warnings = column![
             text("Errors and Warnings:"),
-            container(scrollable(text(errors_and_warnings_text)))
+            container(scrollable(table(columns, ROWS.map(std::path::Path::new))))
                 .width(Fill)
                 .height(Fill)
                 .padding(10)
                 .style(container::rounded_box)
         ];
-
-        let content = column![
-            column![
-                row![
-                    text_input(
-                        "Choose source folder for your backup...",
-                        self.source
-                            .as_ref()
-                            .map_or(String::new(), |p| p.display().to_string())
-                            .as_str()
-                    )
-                    .on_input(Message::SourceInputChanged),
-                    button("Choose").on_press(Message::ChooseSource),
-                ]
-                .spacing(5),
-                row![
-                    text_input(
-                        "Choose destination folder for your backup...",
-                        self.destination
-                            .as_ref()
-                            .map_or(String::new(), |p| p.display().to_string())
-                            .as_str()
-                    )
-                    .on_input(Message::DestinationInputChanged),
-                    button("Choose").on_press(Message::ChooseDestination),
-                ]
-                .spacing(5),
-                column![text(progress_info).size(12), center_x(progress_bar),],
-                center_x(
-                    row![
-                        tooltip(
-                            button("Backup").on_press(Message::StartBackup),
-                            hover_text("Will backup your source folder into your destination folder. This NEVER deletes a file which is in the destination but not in the source folder."),
-                            tooltip::Position::Bottom
-                        ),
-                        tooltip(
-                            button("Sync").on_press(Message::StartSync),
-                            hover_text("Will make your destination identical with your source. This will DELETE files that are in the destination but not in the source folder."),
-                            tooltip::Position::Bottom
-                        ),
-                        tooltip(
-                            button("Restore").on_press(Message::StartRestore),
-                            hover_text("Will restore your source folder from your destination folder. This will NEVER delete files that are in the source but not in the destination folder."),
-                            tooltip::Position::Bottom
-                        ),
-                        tooltip(
-                            button("Sync Restore").on_press(Message::StartSyncRestore),
-                            hover_text("Will make your source folder identical with your destination folder. This will DELETE files that are in the source but not in the destination folder."),
-                            tooltip::Position::Bottom
-                        ),
-                    ]
-                    .spacing(20),
-                ) 
-            ].spacing(10),
-            errors_and_warnings,
-        ].spacing(20);
-
-        center_x(content).padding([20, 20]).into()
+        errors_and_warnings.into()
     }
-
     fn update(&mut self, message: Message) -> iced::Task<Message> {
         match message {
             Message::StartBackup => {
@@ -209,6 +289,14 @@ impl Gui {
 
                 iced::Task::none()
             }
+            Message::OpenPath(path) => {
+                // TODO: Implement https://stackoverflow.com/questions/66485945/with-rust-open-explorer-on-a-file
+                std::process::Command::new("xdg-open")
+                    .arg(path.to_string_lossy().to_string()) // <- Specify the directory you'd like to open.
+                    .spawn()
+                    .unwrap();
+                iced::Task::none()
+            }
         }
     }
 
@@ -220,7 +308,7 @@ impl Gui {
     }
 
     fn theme(_: &Self) -> iced::Theme {
-        iced::Theme::Light
+        iced::Theme::CatppuccinLatte
     }
 
     fn start_backup(&mut self, command: safeall::Command) -> iced::Task<Message> {
@@ -252,9 +340,17 @@ impl Gui {
         task
     }
 }
+const FONT_BYTES: &[u8] = include_bytes!("../fonts/Roboto.ttf");
+const FONT_REGULAR: iced::Font = iced::Font::with_name("Roboto");
+const FONT_BOLD: iced::Font = iced::Font {
+    weight: iced::font::Weight::Bold,
+    ..FONT_REGULAR
+};
 
 fn main() -> Result<(), iced::Error> {
     iced::application(Gui::default, Gui::update, Gui::view)
         .theme(Gui::theme)
+        .font(FONT_BYTES)
+        .default_font(FONT_REGULAR)
         .run()
 }
