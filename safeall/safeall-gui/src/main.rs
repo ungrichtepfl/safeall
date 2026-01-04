@@ -365,9 +365,16 @@ fn get_tray_icon_attributes() -> tray_icon::TrayIconAttributes {
     let menu = tray_icon::menu::Menu::new();
     let show_item = tray_icon::menu::MenuItem::new("Show", true, None);
     let quit_item = tray_icon::menu::MenuItem::new("Quit", true, None);
-    // FIXME: This will crash on macOS; cannot append directly to menu, you need to use submenu:
-    menu.append(&show_item).unwrap();
-    menu.append(&quit_item).unwrap();
+    if cfg!(target_os = "macos") {
+        // NOTE: Appending a menu item directly does not work on macos
+        let submenu = tray_icon::menu::Submenu::new("Settings", true);
+        submenu.append(&show_item).unwrap();
+        submenu.append(&quit_item).unwrap();
+        menu.append(&submenu).unwrap();
+    } else {
+        menu.append(&show_item).unwrap();
+        menu.append(&quit_item).unwrap();
+    }
 
     let icon = tray_icon::Icon::from_rgba([50; 16 * 16 * 4].to_vec(), 16, 16).unwrap();
     tray_icon::TrayIconAttributes {
@@ -380,19 +387,22 @@ fn get_tray_icon_attributes() -> tray_icon::TrayIconAttributes {
 
 fn main() -> Result<(), iced::Error> {
     // NOTE:
-    // https://github.com/ssrlive/iced-demo/blob/master/src/main.rs
-    // https://github.com/tauri-apps/tray-icon/issues/252
+    //  https://github.com/ssrlive/iced-demo/blob/master/src/main.rs
+    //  https://github.com/tauri-apps/tray-icon/issues/252
     // FIXME: On macOS it must be spawn in the main loop
     std::thread::spawn(move || {
         let attrs = get_tray_icon_attributes();
-        // TODO: Enable only for linux:
+
+        #[cfg(target_os = "linux")]
         gtk::init().unwrap();
+
         let _tray_icon = tray_icon::TrayIcon::new(attrs).unwrap();
         loop {
             while let Ok(event) = tray_icon::menu::MenuEvent::receiver().try_recv() {
                 println!("{event:?}");
             }
-            // TODO: Enable only for linux:
+
+            #[cfg(target_os = "linux")]
             gtk::main_iteration();
         }
     });
