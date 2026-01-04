@@ -14,6 +14,8 @@ rfd = { version = "0.16.0", features = [
   "wayland",
   "xdg-portal",
 ], default-features = false }
+tray-icon = "0.21.3"
+gtk = "0.18.2"
 
 [lints.clippy]
 pedantic = "warn"

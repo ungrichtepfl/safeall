@@ -21,6 +21,7 @@ enum Message {
     DestinationInputChanged(String),
     SourceInputChanged(String),
     OpenPath(std::path::PathBuf),
+    OpenWindow,
 }
 
 #[derive(Default, Debug)]
@@ -44,7 +45,7 @@ struct Gui {
 // TODO: https://github.com/harmony-development/Loqui/blob/master/src/screen/mod.rs#L1336
 // https://docs.rs/directories/6.0.0/directories/
 impl Gui {
-    fn view(&self) -> iced::Element<'_, Message> {
+    fn view(&self, window: iced::window::Id) -> iced::Element<'_, Message> {
         use iced::widget::{center_x, column};
 
         let content = column![
@@ -207,6 +208,11 @@ impl Gui {
         ];
         errors_and_warnings.into()
     }
+
+    fn boot() -> (Self, iced::Task<Message>) {
+        (Self::default(), iced::Task::done(Message::OpenWindow))
+    }
+
     fn update(&mut self, message: Message) -> iced::Task<Message> {
         match message {
             Message::StartBackup => {
@@ -297,6 +303,14 @@ impl Gui {
                     .unwrap();
                 iced::Task::none()
             }
+            Message::OpenWindow => {
+                let settings = iced::window::Settings::default();
+                let (_, task) = iced::window::open(settings);
+                task.then(
+                    // TODO: Maybe send message that window has been opened?
+                    |_| iced::Task::none(),
+                )
+            }
         }
     }
 
@@ -307,7 +321,7 @@ impl Gui {
             .map(|d| d.path().to_owned())
     }
 
-    fn theme(_: &Self) -> iced::Theme {
+    fn theme(&self, window: iced::window::Id) -> iced::Theme {
         iced::Theme::CatppuccinLatte
     }
 
@@ -347,8 +361,43 @@ const FONT_BOLD: iced::Font = iced::Font {
     ..FONT_REGULAR
 };
 
+fn get_tray_icon_attributes() -> tray_icon::TrayIconAttributes {
+    let menu = tray_icon::menu::Menu::new();
+    let show_item = tray_icon::menu::MenuItem::new("Show", true, None);
+    let quit_item = tray_icon::menu::MenuItem::new("Quit", true, None);
+    // FIXME: This will crash on macOS; cannot append directly to menu, you need to use submenu:
+    menu.append(&show_item).unwrap();
+    menu.append(&quit_item).unwrap();
+
+    let icon = tray_icon::Icon::from_rgba([50; 16 * 16 * 4].to_vec(), 16, 16).unwrap();
+    tray_icon::TrayIconAttributes {
+        icon: Some(icon),
+        menu: Some(Box::new(menu)),
+        tooltip: Some("Safeall".to_string()),
+        ..Default::default()
+    }
+}
+
 fn main() -> Result<(), iced::Error> {
-    iced::application(Gui::default, Gui::update, Gui::view)
+    // NOTE:
+    // https://github.com/ssrlive/iced-demo/blob/master/src/main.rs
+    // https://github.com/tauri-apps/tray-icon/issues/252
+    // FIXME: On macOS it must be spawn in the main loop
+    std::thread::spawn(move || {
+        let attrs = get_tray_icon_attributes();
+        // TODO: Enable only for linux:
+        gtk::init().unwrap();
+        let _tray_icon = tray_icon::TrayIcon::new(attrs).unwrap();
+        loop {
+            while let Ok(event) = tray_icon::menu::MenuEvent::receiver().try_recv() {
+                println!("{event:?}");
+            }
+            // TODO: Enable only for linux:
+            gtk::main_iteration();
+        }
+    });
+
+    iced::daemon(Gui::boot, Gui::update, Gui::view)
         .theme(Gui::theme)
         .font(FONT_BYTES)
         .default_font(FONT_REGULAR)
