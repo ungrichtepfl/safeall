@@ -1,3 +1,6 @@
+mod icon;
+use crate::icon::{ICON, ICON_HEIGHT, ICON_WIDTH};
+
 #[derive(Clone, Debug)]
 enum Error {
     SafeAll(safeall::Error),
@@ -376,7 +379,8 @@ fn get_tray_icon_attributes() -> tray_icon::TrayIconAttributes {
         menu.append(&quit_item).unwrap();
     }
 
-    let icon = tray_icon::Icon::from_rgba([50; 16 * 16 * 4].to_vec(), 16, 16).unwrap();
+    let icon = tray_icon::Icon::from_rgba(ICON.to_vec(), ICON_WIDTH, ICON_HEIGHT)
+        .expect("Wrong icon format.");
     tray_icon::TrayIconAttributes {
         icon: Some(icon),
         menu: Some(Box::new(menu)),
