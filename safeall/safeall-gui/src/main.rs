@@ -2,13 +2,21 @@ mod icon;
 use crate::icon::{ICON, ICON_HEIGHT, ICON_WIDTH};
 
 #[derive(Clone, Debug)]
+enum TrayIconError {
+    TrayIconCreation(String),
+    MainLoopStopped,
+}
+
+#[derive(Clone, Debug)]
 enum Error {
     SafeAll(safeall::Error),
     Tokio { join_error: String },
+    TrayIcon(TrayIconError),
 }
 
 #[derive(Clone, Debug)]
 enum Message {
+    Noop,
     StartBackup,
     StartSync,
     StartRestore,
@@ -25,6 +33,8 @@ enum Message {
     SourceInputChanged(String),
     OpenPath(std::path::PathBuf),
     OpenWindow,
+    MenuEvent(tray_icon::menu::MenuEvent),
+    TrayIconFailure(Result<(), Error>),
 }
 
 #[derive(Default, Debug)]
@@ -213,7 +223,7 @@ impl Gui {
     }
 
     fn boot() -> (Self, iced::Task<Message>) {
-        (Self::default(), iced::Task::done(Message::OpenWindow))
+        (Default::default(), iced::Task::done(Message::OpenWindow))
     }
 
     fn update(&mut self, message: Message) -> iced::Task<Message> {
@@ -309,11 +319,14 @@ impl Gui {
             Message::OpenWindow => {
                 let settings = iced::window::Settings::default();
                 let (_, task) = iced::window::open(settings);
-                task.then(
-                    // TODO: Maybe send message that window has been opened?
-                    |_| iced::Task::none(),
-                )
+                task.discard()
             }
+            Message::MenuEvent(menu_event) => {
+                println!("{menu_event:?}");
+                iced::Task::none()
+            }
+            Message::TrayIconFailure(_) => todo!(),
+            Message::Noop => iced::Task::none(),
         }
     }
 
@@ -364,10 +377,34 @@ const FONT_BOLD: iced::Font = iced::Font {
     ..FONT_REGULAR
 };
 
-fn get_tray_icon_attributes() -> tray_icon::TrayIconAttributes {
+#[derive(Debug, Hash, PartialEq, Eq)]
+enum MenuItem {
+    Show,
+    Quit,
+}
+
+impl std::fmt::Display for MenuItem {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            MenuItem::Show => write!(f, "Show"),
+            MenuItem::Quit => write!(f, "Quit"),
+        }
+    }
+}
+
+fn get_tray_icon_attributes() -> (
+    tray_icon::TrayIconAttributes,
+    std::collections::HashMap<MenuItem, tray_icon::menu::MenuId>,
+) {
     let menu = tray_icon::menu::Menu::new();
-    let show_item = tray_icon::menu::MenuItem::new("Show", true, None);
-    let quit_item = tray_icon::menu::MenuItem::new("Quit", true, None);
+    let show_item = tray_icon::menu::MenuItem::new(MenuItem::Show.to_string(), true, None);
+    let quit_item = tray_icon::menu::MenuItem::new(MenuItem::Quit.to_string(), true, None);
+    let ids = [
+        (MenuItem::Show, show_item.id().clone()),
+        (MenuItem::Quit, quit_item.id().clone()),
+    ]
+    .into_iter()
+    .collect();
     if cfg!(target_os = "macos") {
         // NOTE: Appending a menu item directly does not work on macos
         let submenu = tray_icon::menu::Submenu::new("Settings", true);
@@ -381,29 +418,43 @@ fn get_tray_icon_attributes() -> tray_icon::TrayIconAttributes {
 
     let icon = tray_icon::Icon::from_rgba(ICON.to_vec(), ICON_WIDTH, ICON_HEIGHT)
         .expect("Wrong icon format.");
-    tray_icon::TrayIconAttributes {
-        icon: Some(icon),
-        menu: Some(Box::new(menu)),
-        tooltip: Some("Safeall".to_string()),
-        ..Default::default()
-    }
+    (
+        tray_icon::TrayIconAttributes {
+            icon: Some(icon),
+            menu: Some(Box::new(menu)),
+            tooltip: Some("Safeall".to_string()),
+            ..Default::default()
+        },
+        ids,
+    )
 }
 
 fn main() -> Result<(), iced::Error> {
     // NOTE:
     //  https://github.com/ssrlive/iced-demo/blob/master/src/main.rs
     //  https://github.com/tauri-apps/tray-icon/issues/252
-    // FIXME: On macOS it must be spawn in the main loop
-    std::thread::spawn(move || {
-        let attrs = get_tray_icon_attributes();
+    use std::sync::{Mutex, mpsc::Receiver};
+    // Global static receiver
+    static TRAY_ICON_EVENT_RECEIVER: Mutex<Option<Receiver<tray_icon::menu::MenuEvent>>> =
+        Mutex::new(None);
 
+    let (tx, rx) = std::sync::mpsc::channel();
+    *TRAY_ICON_EVENT_RECEIVER.lock().unwrap() = Some(rx);
+
+    // FIXME: On macOS it must be spawn in the main loop
+    // TODO: Somehow this spawns it on the main loop
+    std::thread::spawn(move || {
+        let (attrs, ids) = get_tray_icon_attributes();
         #[cfg(target_os = "linux")]
         gtk::init().unwrap();
 
         let _tray_icon = tray_icon::TrayIcon::new(attrs).unwrap();
         loop {
             while let Ok(event) = tray_icon::menu::MenuEvent::receiver().try_recv() {
-                println!("{event:?}");
+                if tx.send(event).is_err() {
+                    // Sender is gone stop the loop
+                    break;
+                }
             }
 
             #[cfg(target_os = "linux")]
@@ -412,6 +463,23 @@ fn main() -> Result<(), iced::Error> {
     });
 
     iced::daemon(Gui::boot, Gui::update, Gui::view)
+        .subscription(move |_state| {
+            iced::Subscription::batch(vec![
+                // iced::window::events().map(|(_id, event)| Message::WindowEvent(event)),
+                iced::time::every(std::time::Duration::from_millis(16)).map(move |_| {
+                    match TRAY_ICON_EVENT_RECEIVER
+                        .lock()
+                        .unwrap()
+                        .as_ref()
+                        .expect("There must be a receiver set")
+                        .try_recv()
+                    {
+                        Ok(event) => Message::MenuEvent(event),
+                        Err(_) => Message::Noop,
+                    }
+                }),
+            ])
+        })
         .theme(Gui::theme)
         .font(FONT_BYTES)
         .default_font(FONT_REGULAR)
