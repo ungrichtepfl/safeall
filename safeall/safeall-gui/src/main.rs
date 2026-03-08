@@ -23,6 +23,10 @@ enum Message {
     StartSyncRestore,
     BackupUpdate(safeall::Message),
     BackupFinished(Result<(), Error>),
+    WindowEvent {
+        id: iced::window::Id,
+        event: iced::window::Event,
+    },
     ChooseSource,
     ChooseDestination,
     SourceFileChosen(Option<std::path::PathBuf>),
@@ -32,9 +36,10 @@ enum Message {
     DestinationInputChanged(String),
     SourceInputChanged(String),
     OpenPath(std::path::PathBuf),
-    OpenWindow,
-    MenuEvent(tray_icon::menu::MenuEvent),
+    OpenApp,
+    TrayMessage(TrayMessage),
     TrayIconFailure(Result<(), Error>),
+    CloseApp,
 }
 
 #[derive(Default, Debug)]
@@ -53,6 +58,8 @@ struct Gui {
     backup_state: BackupState,
     source: Option<std::path::PathBuf>,
     destination: Option<std::path::PathBuf>,
+    menu_ids: Option<std::collections::HashMap<tray_icon::menu::MenuId, MenuItem>>,
+    window_ids: std::collections::HashSet<iced::window::Id>,
 }
 
 // TODO: https://github.com/harmony-development/Loqui/blob/master/src/screen/mod.rs#L1336
@@ -223,7 +230,7 @@ impl Gui {
     }
 
     fn boot() -> (Self, iced::Task<Message>) {
-        (Default::default(), iced::Task::done(Message::OpenWindow))
+        (Default::default(), iced::Task::done(Message::OpenApp))
     }
 
     fn update(&mut self, message: Message) -> iced::Task<Message> {
@@ -316,17 +323,54 @@ impl Gui {
                     .unwrap();
                 iced::Task::none()
             }
-            Message::OpenWindow => {
-                let settings = iced::window::Settings::default();
-                let (_, task) = iced::window::open(settings);
-                task.discard()
+            Message::OpenApp => {
+                if self.window_ids.is_empty() {
+                    let settings = iced::window::Settings::default();
+                    let (_, task) = iced::window::open(settings);
+                    task.discard()
+                } else {
+                    iced::Task::none()
+                }
             }
-            Message::MenuEvent(menu_event) => {
-                println!("{menu_event:?}");
-                iced::Task::none()
-            }
+            Message::TrayMessage(tray_message) => match tray_message {
+                TrayMessage::MenuEvent(menu_event) => {
+                    let menu_ids = self
+                        .menu_ids
+                        .as_ref()
+                        .expect("Menu ids must be sent before any other message");
+                    let menu_item = menu_ids.get(&menu_event.id).expect("Wrong ID");
+                    match menu_item {
+                        MenuItem::Show => iced::Task::done(Message::OpenApp),
+                        MenuItem::Quit => iced::Task::done(Message::CloseApp),
+                    }
+                }
+                TrayMessage::MenuIds(menu_ids) => {
+                    self.menu_ids = Some(menu_ids);
+                    iced::Task::none()
+                }
+            },
             Message::TrayIconFailure(_) => todo!(),
             Message::Noop => iced::Task::none(),
+            Message::CloseApp => {
+                let close = self
+                    .window_ids
+                    .iter()
+                    .copied()
+                    .map(iced::window::close::<()>);
+                iced::Task::batch(close).discard()
+            }
+            Message::WindowEvent { id, event } => {
+                match event {
+                    iced::window::Event::Opened { .. } => {
+                        self.window_ids.insert(id);
+                    }
+                    iced::window::Event::Closed => {
+                        self.window_ids.remove(&id);
+                    }
+                    _ => {}
+                }
+                iced::Task::none()
+            }
         }
     }
 
@@ -377,7 +421,7 @@ const FONT_BOLD: iced::Font = iced::Font {
     ..FONT_REGULAR
 };
 
-#[derive(Debug, Hash, PartialEq, Eq)]
+#[derive(Clone, Debug, Hash, PartialEq, Eq)]
 enum MenuItem {
     Show,
     Quit,
@@ -394,14 +438,14 @@ impl std::fmt::Display for MenuItem {
 
 fn get_tray_icon_attributes() -> (
     tray_icon::TrayIconAttributes,
-    std::collections::HashMap<MenuItem, tray_icon::menu::MenuId>,
+    std::collections::HashMap<tray_icon::menu::MenuId, MenuItem>,
 ) {
     let menu = tray_icon::menu::Menu::new();
     let show_item = tray_icon::menu::MenuItem::new(MenuItem::Show.to_string(), true, None);
     let quit_item = tray_icon::menu::MenuItem::new(MenuItem::Quit.to_string(), true, None);
     let ids = [
-        (MenuItem::Show, show_item.id().clone()),
-        (MenuItem::Quit, quit_item.id().clone()),
+        (show_item.id().clone(), MenuItem::Show),
+        (quit_item.id().clone(), MenuItem::Quit),
     ]
     .into_iter()
     .collect();
@@ -429,14 +473,19 @@ fn get_tray_icon_attributes() -> (
     )
 }
 
+#[derive(Clone, Debug)]
+enum TrayMessage {
+    MenuEvent(tray_icon::menu::MenuEvent),
+    MenuIds(std::collections::HashMap<tray_icon::menu::MenuId, MenuItem>),
+}
+
 fn main() -> Result<(), iced::Error> {
     // NOTE:
     //  https://github.com/ssrlive/iced-demo/blob/master/src/main.rs
     //  https://github.com/tauri-apps/tray-icon/issues/252
     use std::sync::{Mutex, mpsc::Receiver};
     // Global static receiver
-    static TRAY_ICON_EVENT_RECEIVER: Mutex<Option<Receiver<tray_icon::menu::MenuEvent>>> =
-        Mutex::new(None);
+    static TRAY_ICON_EVENT_RECEIVER: Mutex<Option<Receiver<TrayMessage>>> = Mutex::new(None);
 
     let (tx, rx) = std::sync::mpsc::channel();
     *TRAY_ICON_EVENT_RECEIVER.lock().unwrap() = Some(rx);
@@ -445,15 +494,16 @@ fn main() -> Result<(), iced::Error> {
     // TODO: Somehow this spawns it on the main loop
     std::thread::spawn(move || {
         let (attrs, ids) = get_tray_icon_attributes();
+        tx.send(TrayMessage::MenuIds(ids)).unwrap();
         #[cfg(target_os = "linux")]
         gtk::init().unwrap();
 
         let _tray_icon = tray_icon::TrayIcon::new(attrs).unwrap();
-        loop {
+        'outer: loop {
             while let Ok(event) = tray_icon::menu::MenuEvent::receiver().try_recv() {
-                if tx.send(event).is_err() {
+                if tx.send(TrayMessage::MenuEvent(event)).is_err() {
                     // Sender is gone stop the loop
-                    break;
+                    break 'outer;
                 }
             }
 
@@ -465,7 +515,7 @@ fn main() -> Result<(), iced::Error> {
     iced::daemon(Gui::boot, Gui::update, Gui::view)
         .subscription(move |_state| {
             iced::Subscription::batch(vec![
-                // iced::window::events().map(|(_id, event)| Message::WindowEvent(event)),
+                iced::window::events().map(|(id, event)| Message::WindowEvent { id, event }),
                 iced::time::every(std::time::Duration::from_millis(16)).map(move |_| {
                     match TRAY_ICON_EVENT_RECEIVER
                         .lock()
@@ -474,7 +524,7 @@ fn main() -> Result<(), iced::Error> {
                         .expect("There must be a receiver set")
                         .try_recv()
                     {
-                        Ok(event) => Message::MenuEvent(event),
+                        Ok(event) => Message::TrayMessage(event),
                         Err(_) => Message::Noop,
                     }
                 }),
