@@ -495,20 +495,45 @@ fn main() -> Result<(), iced::Error> {
     std::thread::spawn(move || {
         let (attrs, ids) = get_tray_icon_attributes();
         tx.send(TrayMessage::MenuIds(ids)).unwrap();
+
         #[cfg(target_os = "linux")]
         gtk::init().unwrap();
 
         let _tray_icon = tray_icon::TrayIcon::new(attrs).unwrap();
+
+        #[cfg(target_os = "windows")]
+        let mut win_msg = {
+            use windows::Win32::UI::WindowsAndMessaging::MSG;
+            MSG::default()
+        };
+
         'outer: loop {
+            // Handle tray menu events
             while let Ok(event) = tray_icon::menu::MenuEvent::receiver().try_recv() {
                 if tx.send(TrayMessage::MenuEvent(event)).is_err() {
-                    // Sender is gone stop the loop
                     break 'outer;
                 }
             }
 
             #[cfg(target_os = "linux")]
-            gtk::main_iteration();
+            {
+                gtk::main_iteration();
+            }
+
+            #[cfg(target_os = "windows")]
+            {
+                use windows::Win32::UI::WindowsAndMessaging::{
+                    DispatchMessageW, GetMessageW, TranslateMessage,
+                };
+
+                unsafe {
+                    if GetMessageW(&mut win_msg, None, 0, 0).into()
+                    {
+                        let _ = TranslateMessage(&win_msg);
+                        let _ = DispatchMessageW(&win_msg);
+                    }
+                }
+            }
         }
     });
 

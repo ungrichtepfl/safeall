@@ -19,5 +19,10 @@ tray-icon = "0.21.3"
 [target.'cfg(target_os = "linux")'.dependencies]
 gtk = "0.18.2"
 
+[target.'cfg(target_os = "windows")'.dependencies]
+windows = {  version = "0.62.2", features = [
+  "Win32_UI_WindowsAndMessaging"
+] }
+
 [lints.clippy]
 pedantic = "warn"
